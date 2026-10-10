@@ -13,10 +13,10 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import agent  # noqa: E402
-import browsers  # noqa: E402
-import models  # noqa: E402
-import run as contract  # noqa: E402
+import first_try.agent as agent  # noqa: E402
+import first_try.browsers as browsers  # noqa: E402
+import first_try.models as models  # noqa: E402
+import first_try.run as contract  # noqa: E402
 
 RUN = {
     "run_id": "run_test", "brief": "Prepare the bid.", "answer_schema": {"type": "object"},

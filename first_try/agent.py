@@ -10,9 +10,9 @@ import sys
 
 from playwright.async_api import async_playwright
 
-import browsers
-import models  # noqa: F401  models.ask_qwen, models.ask_clef: see models.py
-import run as contract
+import first_try.browsers as browsers
+import first_try.models as models  # noqa: F401  models.ask_qwen, models.ask_clef: see models.py
+import first_try.run as contract
 
 
 async def solve(task: dict, page) -> dict | None:
@@ -52,3 +52,4 @@ async def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(asyncio.run(main()))
+
