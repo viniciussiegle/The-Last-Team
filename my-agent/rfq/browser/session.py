@@ -104,12 +104,16 @@ class BrowserSession:
                 return
             except Exception:
                 if attempt == attempts:
-                    raise
+                    break
                 stuck, self.page = self.page, await self.new_tab()
                 try:
                     await asyncio.wait_for(stuck.close(), 3)
                 except Exception:
                     pass
+        # A site that cannot be reached at the start (it happened to one site for a whole minute) must not end
+        # the run for the other three: its worker starts anyway and keeps coming back to the entry address.
+        self.last_good_url = self.site["url"]
+        self.notices.append("This site did not load at the start of the run; the entry address is being tried again.")
 
     async def close(self):
         if self.local:

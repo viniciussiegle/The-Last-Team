@@ -458,6 +458,14 @@ class ObservedActions(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.context.pages), 2)
         self.assertIn("Popup: synthetic popup text", snapshot.text)
 
+    async def test_a_site_that_never_loads_at_the_start_does_not_end_the_run(self):
+        await self.context.route("https://synthetic.example.test/**", lambda route: None)  # never answered
+
+        await self.session.open_entry(attempts=2, limit_ms=800)
+
+        self.assertEqual(self.session.last_good_url, "https://synthetic.example.test/")
+        self.assertTrue(any("did not load at the start" in notice for notice in self.session.notices))
+
     async def test_entry_site_is_retried_on_a_fresh_tab_when_a_load_gets_no_answer(self):
         attempts = []
 
