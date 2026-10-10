@@ -46,9 +46,10 @@ class Settings:
     cdp_urls: list[str]
     headless: bool
     data_dir: Path
-    submit_margin_s: int = 600
+    submit_margin_s: int = 420
     max_steps: int = 70
-    run_budget_s: int = 2100
+    # A scored run ends after 20 minutes; test runs allow longer but must behave the same.
+    run_budget_s: int = 1140
     # The model is chosen by configuration alone; any OpenAI-compatible endpoint behind the run proxy fits.
     model_name: str = "qwen3.8-flash-next"
     model_base_url_env: str = "QWEN_BASE_URL"
@@ -102,9 +103,9 @@ class Settings:
             cdp_urls=urls,
             headless=str(source.get("HEADLESS", "0")).strip().lower() in {"1", "true", "yes", "on"},
             data_dir=data_dir,
-            submit_margin_s=int(source.get("SUBMIT_MARGIN_S", "600")),
+            submit_margin_s=int(source.get("SUBMIT_MARGIN_S", "420")),
             max_steps=int(source.get("MAX_STEPS", "70")),
-            run_budget_s=int(source.get("RUN_BUDGET_S", "2100")),
+            run_budget_s=int(source.get("RUN_BUDGET_S", "1140")),
             model_name=source.get("MODEL_NAME") or source.get("QWEN_MODEL", "qwen3.8-flash-next"),
             model_base_url_env=source.get("MODEL_BASE_URL_ENV", "QWEN_BASE_URL"),
             model_api_key_env=source.get("MODEL_API_KEY_ENV", "QWEN_API_KEY"),

@@ -20,9 +20,22 @@ class WatchdogDeadlines(unittest.TestCase):
                 patch("rfq.submit.watchdog.seconds_left", return_value=3000.0):
             freeze, end = deadlines({}, settings)
 
-        self.assertEqual(settings.run_budget_s, 2100)
-        self.assertEqual(settings.submit_margin_s, 600)
-        self.assertEqual((freeze, end), (1600.0, 2200.0))
+        self.assertEqual(settings.run_budget_s, 1140)
+        self.assertEqual(settings.submit_margin_s, 420)
+        self.assertEqual((freeze, end), (820.0, 1240.0))
+
+    def test_a_long_test_run_and_a_scored_run_get_the_same_deadlines_inside_twenty_minutes(self):
+        settings = Settings.from_env({})
+        outcomes = []
+        for platform_seconds_left in (7200.0, 1200.0):
+            with patch("rfq.submit.watchdog.time.monotonic", return_value=100.0), \
+                    patch("rfq.submit.watchdog.seconds_left", return_value=platform_seconds_left):
+                outcomes.append(deadlines({}, settings))
+
+        self.assertEqual(outcomes[0], outcomes[1])
+        freeze, end = outcomes[1]
+        self.assertLessEqual(end - 100.0, 1200.0)
+        self.assertGreater(freeze, 100.0)
 
     def test_short_platform_deadline_never_freezes_before_start(self):
         settings = Settings.from_env({})
