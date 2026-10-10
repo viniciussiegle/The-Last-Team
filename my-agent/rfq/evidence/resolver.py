@@ -48,6 +48,10 @@ def resolve(ledger, context):
             result.gaps.append("Conflicting current specification revisions: verify status")
         else:
             result.spec = specs[-1]
+            if hasattr(result.spec, "requirements"):
+                # The same revision may be recorded incrementally from paged views.
+                merged = {r.requirement_id: r for spec in specs for r in spec.requirements}
+                result.spec = result.spec.model_copy(update={"requirements": list(merged.values())})
     if result.spec is None:
         result.gaps.append("Find the specification revision explicitly marked current")
     candidates = sorted((q for q in ledger.of("QAEntry") if timestamp(q.date) <= scenario), key=lambda q: timestamp(q.date))

@@ -37,5 +37,19 @@ runs; any fair-play doubt; or half the development frontier budget spent.
 After each completed milestone write five lines to PROGRESS.md and commit on
 main. Reach the first eligible sandbox test before dashboard polish.
 
+## Generality acceptance
+
+Treat public challenge runs as development data. Never copy their values into
+fixtures. Before a holdout evaluation, freeze the package, prompts, model and
+configuration hashes; generate fresh synthetic seeds only after freezing.
+Store seeds, expected answers, observations and results outside the checkout.
+Use independent expected values and varied layouts, labels and information
+placement. Exercise the actual model/browser loop, not scripted navigation.
+Every used holdout seed is retired. A failure may become a development
+regression, but changes must be evaluated on fresh seeds. Do not tune against
+a reused holdout or claim that synthetic success guarantees private success.
+Gate releases on fairplay plus the documented generality checks; report
+navigation failures and variant coverage, not just an aggregate score.
+
 See ARCHITECTURE.md for the current interfaces. Preserve user-owned .codex and
 .entire configuration and hooks. Do not repeat login or tooling setup.

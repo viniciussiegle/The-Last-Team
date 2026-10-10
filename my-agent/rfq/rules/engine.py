@@ -81,7 +81,9 @@ def calculate(ledger, context, include_setup_in_surcharge=True, core_only=False)
                    and all(D(getattr(m, name)) == D(attributes[name]) for name in ("bore", "stroke", "pressure"))
                    and all(normalized(getattr(m, name)) == normalized(attributes[name]) for name in ("mounting", "certification"))]
         if not matches:
-            coverage = [c for c in ledger.of("SearchCoverage") if c.katalog_group == requirement.katalog_group and c.complete]
+            observed_materials = {m.number for m in materials if normalized(m.katalog_group) == normalized(requirement.katalog_group)}
+            coverage = [c for c in ledger.of("SearchCoverage") if c.katalog_group == requirement.katalog_group and c.complete
+                        and set(c.candidate_materials) <= observed_materials]
             if coverage:
                 answer.update(decision="no_bid", positions=[], total_net=Decimal(0), discount_percent=Decimal(0))
                 calc.complete = True

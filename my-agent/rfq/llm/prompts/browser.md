@@ -17,6 +17,12 @@ READONLY controls cannot be edited; DISABLED controls require their visible
 prerequisite first. For a range slider, type(id,text) sets its numeric value,
 or press(key,id) focuses that element before pressing the key. Menus may need
 to be opened before their section links appear. Modal controls take priority.
+For informational notices, inspect a close button before following a link that
+would navigate away from your work. A visually similar label can have a different
+target; compare the current element's role and href.
+Checkbox/radio state is explicitly CHECKED or UNCHECKED; an HTML value does
+not indicate selection. Read each declaration before setting it; accepting
+one statement never implies accepting every adjacent statement.
 
 Record all relevant candidate evidence, including superseded records, dated
 clarifications, withdrawals and look-alikes with their exact metadata. Code will

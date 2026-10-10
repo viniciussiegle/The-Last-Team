@@ -113,6 +113,26 @@ def answer_lines(calculation):
 
 
 class PricingAndSelection(unittest.TestCase):
+    def test_partial_candidate_inspection_does_not_prove_no_bid(self):
+        partial = ledger(materials=[material(status="blocked")], coverage=[
+            SearchCoverage(katalog_group="Group-A", complete=True,
+                           candidate_materials=["MAT-1", "MAT-UNREAD"])])
+        result = calculate(partial, context(), core_only=True)
+        self.assertEqual(result.answer["decision"], "bid")
+        self.assertFalse(result.complete)
+        self.assertTrue(any("search all active candidates" in gap for gap in result.gaps))
+
+    def test_current_revision_requirements_can_arrive_on_separate_pages(self):
+        first = spec([requirement("R-A")])
+        second = spec([requirement("R-B")])
+        result = calculate(ledger(
+            positions=[position("P-A", "2", requirement_ref="R-A"),
+                       position("P-B", "3", requirement_ref="R-B")],
+            specs=[first, second]), context(), core_only=True)
+        self.assertTrue(result.complete, result.gaps)
+        self.assertEqual(set(answer_lines(result)), {"P-A", "P-B"})
+        self.assertEqual(result.answer["total_net"], Decimal("50.00"))
+
     def test_core_only_prices_all_positions_with_unknown_commercial_adjustments(self):
         positions = [position("P-A", "2"), position("P-B", "3")]
         incomplete_commercials = material(setup_fee=None, surcharge_mass=None)

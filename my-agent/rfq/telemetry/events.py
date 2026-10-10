@@ -12,13 +12,17 @@ from typing import Any
 _SENSITIVE = re.compile(r"credential|password|passwd|secret|(?:^|_)(?:run_token|access_token|token)$|api[_-]?key|authorization|cookie|username|user[_-]?name", re.I)
 
 
-def _safe(value: Any, key: str = "") -> Any:
+def _safe(value: Any, key: str = "", secrets=()) -> Any:
     if _SENSITIVE.search(key):
         return "[REDACTED]"
     if isinstance(value, dict):
-        return {str(k): _safe(v, str(k)) for k, v in value.items()}
+        return {str(k): _safe(v, str(k), secrets) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
-        return [_safe(item) for item in value]
+        return [_safe(item, secrets=secrets) for item in value]
+    if isinstance(value, str):
+        for secret in secrets:
+            value = value.replace(secret, "[REDACTED]")
+        return value
     if isinstance(value, Decimal):
         return str(value)
     if isinstance(value, Path):
@@ -39,6 +43,11 @@ class EventBus:
         self.run_dir = root / safe_id
         self.run_dir.mkdir(parents=True, exist_ok=True)
         self.events_path = self.run_dir / "events.jsonl"
+        self.secrets = set()
+
+    def add_secret(self, value):
+        if isinstance(value, str) and value:
+            self.secrets.add(value)
 
     def emit(self, type: str, agent: str, data: dict) -> dict:
         event = {
@@ -46,7 +55,7 @@ class EventBus:
             "run_id": self.run_dir.name,
             "type": type,
             "agent": agent,
-            "data": _safe(data),
+            "data": _safe(data, secrets=sorted(self.secrets, key=len, reverse=True)),
         }
         line = json.dumps(event, ensure_ascii=False, separators=(",", ":"), default=str)
         with self.events_path.open("a", encoding="utf-8", newline="\n") as stream:

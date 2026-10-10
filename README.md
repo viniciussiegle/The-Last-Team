@@ -1,112 +1,69 @@
-# Atira starter kit
+# The Last Team: RFQ agent
 
-A minimal starting point, not an agent. It does the platform plumbing: it reads the run, attaches to the run's
-browsers and shows how to call the free hosted models. Then it stops at `solve()` in `agent.py`, the place for your
-agent. Out of the box it exits without an answer.
+Four model-driven browser workers gather tender, specification, ERP and mailbox
+evidence. A deterministic resolver and Decimal calculator build a bid; a browser
+submitter fills the tender website and signs with a fresh mailbox code. Site
+addresses, credentials, task identifiers and business values come from the run.
 
-| File | What it does |
-| --- | --- |
-| `run.py` | The run contract: reads the run (`load_run`) and submits an API answer (`submit_answer`) |
-| `browsers.py` | Attaches to the run's browsers over CDP and gets a page (`connect`); locally it starts a Chromium |
-| `models.py` | One call to each hosted model: `ask_qwen` (Qwen3.8-Flash-Next) and `ask_clef` (Cloudflare Clef) |
-| `agent.py` | The entry point: reads the run, connects browser 1, calls `solve(task, page)` and submits what it returns |
-| `agent.json` | How the sandbox installs (`uv sync`, the versions in `uv.lock`) and runs it; it waits for the hosted `qwen` |
-| `tests/` | The plumbing against fakes |
-
-## Your agent goes in `solve()`
-
-`solve(task, page)` gets the run and a Playwright page in browser 1:
-
-- `task["brief"]`: the task and its rules;
-- `task["access"]`: each website's `siteId`, `url` and `credentials`;
-- `task["submission"]`: where the answer goes, `{"kind": "api", "url": ...}` or `{"kind": "site", "url": ...}`;
-- `task["answer_schema"]`: the JSON Schema of the answer.
-
-For an `api` submission, return the answer and `main()` submits it: `202` is accepted and final, `400` lists the
-issues to fix. For a `site` submission, enter the answer on that website yourself and return `None`. Reading pages,
-acting on them and working out the answer are yours to build.
-
-Mind the clock: a scored run has 20 minutes, and `run.seconds_left(task)` says how many seconds are left. Every part
-of the answer scores on its own, so submit your best answer about a minute before the end rather than keep
-searching; an answer that comes too late scores 0.
-
-More browsers: set `"browsers": 2` (up to 4) in `agent.json`, then `await browsers.connect(playwright, 1)` attaches
-to browser 2.
-
-## The hosted models in short
-
-Both are free and need no key of yours: runs get the variables, and locally `atira scout --env` sets them, pointed
-at `atira models proxy`.
-
-```python
-import models
-
-text = await models.ask_qwen("Which button submits this form? ...")          # QWEN_BASE_URL, QWEN_API_KEY
-yes = await models.ask_clef({"page": page_text}, "Is this the current revision?")  # CLEF_BASE_URL, CLEF_API_KEY
+```mermaid
+flowchart LR
+    Run[Runtime brief and site access] --> Planner[Planner and deadline]
+    Planner --> Workers[Four browser workers]
+    Workers --> Ledger[Typed evidence with provenance]
+    Ledger --> Resolver[Authority, date, revision and withdrawal resolver]
+    Resolver --> Rules[Decimal rules and calculation trace]
+    Rules -->|Missing facts| Planner
+    Rules --> Freeze[Validate and freeze answer]
+    Freeze --> Submit[Website submitter and fresh signing code]
+    Workers --> Events[External event logs]
+    Rules --> Events
+    Submit --> Events
 ```
 
-`models.qwen()` is an OpenAI SDK client, for tool calls, images and everything else. Clef is set only where the
-platform hosts it; if your agent relies on it, list `"models": ["qwen", "clef"]` in `agent.json` so the run waits for
-it to warm up. Another provider works with your own key through the run's metering proxy:
-`$API/docs/run-contract.md#llm-calls`.
+Only `my-agent/` ships. It extends the supplied starter and uses Python 3.12,
+uv, Playwright CDP, Pydantic and Qwen. The root contains development scripts,
+synthetic tests and build documentation. Frontier access is disabled pending
+human approval. [PROGRESS.md](PROGRESS.md) records the latest completed gate;
+[ARCHITECTURE.md](ARCHITECTURE.md) defines interfaces and evaluation limits.
 
-## Run it locally
+Install dependencies and Chromium from `my-agent/` using `uv sync --frozen`
+and `uv run playwright install chromium`. Start the already authenticated
+Atira CLI's `atira models proxy` for local model access. From the repository
+root, `python scripts/run_local.py --dry` checks runtime configuration,
+`python scripts/run_local.py --orient` verifies browser access, and
+`python scripts/run_local.py` runs the complete local workflow. The launcher
+parses scouting exports as data; it never executes them as shell code.
 
-You need [uv](https://docs.astral.sh/uv/getting-started/installation/) (open a new terminal after installing it, so
-it is on your PATH) and the Atira CLI, signed in once with `atira login`.
-
-Terminal 1: start the free models and leave it open.
-
-```sh
-atira models proxy
-```
-
-Terminal 2, in this folder:
-
-```sh
-uv sync && uv run playwright install chromium
-eval "$(atira scout --env)"     # the scouting logins, and the model variables pointed at that proxy
-uv run --no-sync python agent.py
-```
-
-In PowerShell on Windows, Terminal 2:
+Run development checks from the root with the package interpreter:
 
 ```powershell
-uv sync; uv run playwright install chromium
-atira scout --env | Out-String | Invoke-Expression    # the same exports
-uv run --no-sync python agent.py
+.\my-agent\.venv\Scripts\python.exe -m unittest discover -s tests -v
+.\my-agent\.venv\Scripts\python.exe scripts/fairplay_check.py
+.\my-agent\.venv\Scripts\python.exe scripts/package.py
 ```
 
-A Chromium window opens (`HEADLESS=1` hides it). Nothing done with the scouting logins counts, and locally an answer
-is printed, never submitted. If `atira` says `Unknown command: models`, run `atira upgrade`.
+On Linux, use `my-agent/.venv/bin/python` for the same commands. Packaging
+runs the leakage scan and includes only package files. Archives, downloaded
+documents, screenshots, seeds and run logs must remain outside the checkout.
+The default local data root is `%LOCALAPPDATA%/atira-rfq` on Windows and the
+system temporary directory elsewhere; `RFQ_DATA_DIR` may select another
+external directory. Event logs include provenance, actions, model cost,
+calculation traces and the frozen answer. Never commit runtime artifacts.
 
-## Test-run it, then submit it
+Generality is an acceptance requirement. `scripts/generality.py --cases 3`
+uses the real model/browser loop against fresh synthetic layouts, labels,
+paths and decoys. Supply the existing `QWEN_BASE_URL` and `QWEN_API_KEY`
+environment variables. It freezes package, prompt, model and configuration
+hashes before generating seeds, writes expected answers and results externally,
+and retires every seed. `--prepare-only` checks fixture preparation but cannot
+pass the evaluation. A failing seed may become a development regression; a
+changed agent must use fresh seeds. Initial coverage is navigation and tender
+extraction; full four-site transfer remains a later milestone. Passing these
+checks does not guarantee performance on an unknown private website.
 
-```sh
-atira test-run .   # the sandbox, exactly like a scored run, on the public dataset; opens the run page live
-atira submit .     # reviewed, then run once and scored for the leaderboard
-```
-
-Both pack this directory without what `.gitignore` excludes.
-
-## Environment
-
-| Variable | Set by | Used for |
-| --- | --- | --- |
-| `CHALLENGE_API_URL`, `CHALLENGE_RUN_TOKEN` | runs | the run, at `/v1/runs/current` |
-| `CHALLENGE_SCOUTING` | `atira scout --env` | locally: the brief and the scouting logins |
-| `CDP_URL`, `CDP_URLS` | runs | the sandbox's browsers; locally the kit starts its own Chromium |
-| `QWEN_BASE_URL`, `QWEN_API_KEY` | runs, `atira scout --env` | the hosted Qwen |
-| `CLEF_BASE_URL`, `CLEF_API_KEY` | runs, `atira scout --env`, when Clef is hosted | the hosted Clef |
-
-## Docs
-
-- How a run works: `$API/docs/run-contract.md`
-- Building an agent: `$API/docs/building-an-agent.md`
-- Fair play, the rules: `$API/docs/fair-play.md`
-
-## Tests
-
-```sh
-uv run python -m unittest discover -s tests
-```
+`RULES_STAGE=core` is the initial end-to-end mode. `RULES_STAGE=full` enables
+the complete commercial adjustment pipeline, whose sandbox scoring gate is
+still pending. `RUN_BUDGET_S` and `SUBMIT_MARGIN_S` control the deadline.
+Sandbox tests are authorized up to four concurrent team runs. Every scored
+submission, frontier model choice and frontier enablement requires explicit
+human approval; see [AGENTS.md](AGENTS.md).

@@ -28,6 +28,7 @@ TOOLS = [
     }, ["kind", "reason"]),
     function("record", "Append a typed fact grounded in the observed page or chosen document. Follow the supplied record schema.", {
         "kind": {"type": "string"}, "data": {"type": "object"},
+        "frame_path": {"type": "string", "description": "Observed source frame path, such as frame/0, when the evidence is in a nested frame."},
         "snippet": {"type": "string", "maxLength": 300}
     }, ["kind", "data", "snippet"]),
     function("done", "Task complete; summarize what was found and any unresolved gaps.", {
@@ -50,6 +51,11 @@ class BrowserAgent:
         self.step_count = 0
         self.tan_fetcher = None
         self.observations = []
+        if hasattr(bus, "add_secret"):
+            bus.add_secret(settings.run_token)
+            for site in run.get("access", []):
+                for value in (site.get("credentials") or {}).values():
+                    bus.add_secret(value)
 
     async def summarize(self):
         reply = await self.model.complete(self.name, [
@@ -61,7 +67,7 @@ class BrowserAgent:
         self.bus.emit("agent_done", self.name, result)
         return result
 
-    async def run(self, task: str, max_steps=None, until=None, submit=False):
+    async def run(self, task: str, max_steps=None, until=None, submit=False, stop_record=None):
         system = Path(__file__).parents[1].joinpath("llm/prompts/browser.md").read_text(encoding="utf-8")
         record_schema = self.ledger.schema_text() if self.ledger else "No evidence records required for orientation."
         system += "\nRECORD CONTRACTS\n" + record_schema
@@ -80,12 +86,15 @@ class BrowserAgent:
                 snapshot = await observe(self.session)
                 self.observations.append(snapshot.text)
                 self.observations = self.observations[-3:]
-                self.bus.emit("observation", self.name, {"text": snapshot.text, "page_url": self.session.page.url})
+                logged_snapshot = "[Signing mailbox observation omitted]" if self.ledger and self.ledger.allow_tan else snapshot.text
+                self.bus.emit("observation", self.name, {"text": logged_snapshot, "page_url": self.session.page.url})
                 hashes.append(snapshot.digest)
                 if len(hashes) >= 3 and len(set(hashes[-3:])) == 1:
                     tool_result += "\nPage unchanged repeatedly. Choose a DIFFERENT control/search/tab/strategy; do not repeat the same action."
                 if not any(e.get("type") == "password" for e in snapshot.elements.values()):
                     self.session.last_good_url = self.session.page.url
+                    from ..browser.session import origin
+                    self.session.last_good_urls[origin(self.session.page.url)] = self.session.page.url
                 shared = json.dumps(self.shared, ensure_ascii=False, default=str)
                 known = self.ledger.summary() if self.ledger else ""
                 remaining_steps = (max_steps or self.settings.max_steps) - step
@@ -126,8 +135,14 @@ class BrowserAgent:
                         tool_result += await self.tan_fetcher()
                     elif name == "record":
                         if self.ledger:
-                            result = self.ledger.add(args["kind"], args["data"], self.session, self.name, args.get("snippet", ""))
+                            result = self.ledger.add(args["kind"], args["data"], self.session, self.name, args.get("snippet", ""), args.get("frame_path", "frame/0"))
                             tool_result += str(result) + "\n"
+                            if stop_record == args["kind"] and result == "Recorded " + stop_record:
+                                self.summary = "Requested evidence recorded."
+                                outcome = {"summary": self.summary, "recorded": stop_record}
+                                self.shared[self.name] = outcome
+                                self.bus.emit("agent_done", self.name, outcome)
+                                return outcome
                         else:
                             tool_result += "Orientation has no record ledger. Summarize the site when done.\n"
                     elif name == "browser":
@@ -155,8 +170,12 @@ class BrowserAgent:
                 self.step_count += 1
             except Exception as error:
                 tool_result = f"Tool/observation error: {type(error).__name__}: {str(error)[:1500]}. Adapt using a fresh observation."
-                for value in (self.session.site.get("credentials") or {}).values():
-                    if isinstance(value, str) and value:
-                        tool_result = tool_result.replace(value, "[credential]")
+                for site in [self.session.site, *self.session.sites_by_origin.values()]:
+                    for value in (site.get("credentials") or {}).values():
+                        if isinstance(value, str) and value:
+                            tool_result = tool_result.replace(value, "[credential]")
+                tool_result = re.sub(r"(?im)(cookie|authorization|x-api-key):[^\n]*", r"\1: [redacted]", tool_result)
+                if self.settings.run_token:
+                    tool_result = tool_result.replace(self.settings.run_token, "[run token]")
                 self.bus.emit("retry", self.name, {"step": step, "reason": tool_result})
         return {"summary": self.summary, "gaps": ["Step limit reached"]}

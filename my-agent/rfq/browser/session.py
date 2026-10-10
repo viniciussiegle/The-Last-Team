@@ -25,6 +25,13 @@ class BrowserSession:
     last_snapshot: object = None
     nav_hashes: set[str] = field(default_factory=set)
     local: bool = False
+    request_factory: object = None
+    sites_by_origin: dict = field(default_factory=dict)
+    last_good_urls: dict = field(default_factory=dict)
+
+    @property
+    def current_site(self):
+        return self.sites_by_origin.get(origin(self.page.url), self.site)
 
     def install_handlers(self, page):
         async def dialog_handler(dialog):
@@ -58,6 +65,8 @@ class BrowserSession:
         page = context.pages[0] if context.pages else await context.new_page()
         page.set_default_timeout(7000)
         session = cls(browser, context, page, site, {origin(s["url"]) for s in sites}, local=not settings.cdp_urls)
+        session.request_factory = playwright.request
+        session.sites_by_origin = {origin(s["url"]): s for s in sites}
         session.install_handlers(page)
         context.on("page", lambda popup: asyncio.create_task(session.capture_popup(popup)))
         # The run assigns an entry site, not an investigation path.

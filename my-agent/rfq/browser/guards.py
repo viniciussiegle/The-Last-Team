@@ -2,6 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import re
+from urllib.parse import urlsplit
+
+
+def _origin(url):
+    parts = urlsplit(url)
+    return f"{parts.scheme}://{parts.netloc}"
 
 
 async def consent(session):
@@ -22,11 +28,14 @@ async def consent(session):
 
 async def login(session) -> str:
     """Fill a model-selected login form using generic credential field types."""
-    credentials = session.site.get("credentials") or {}
     for frame in session.page.frames:
         passwords = frame.locator('input[type="password"]:visible')
         if not await passwords.count():
             continue
+        # An assigned worker may follow evidence to another run-provided site.
+        site = getattr(session, "sites_by_origin", {}).get(_origin(frame.url),
+                getattr(session, "current_site", session.site))
+        credentials = site.get("credentials") or {}
         form = passwords.first.locator("xpath=ancestor::form[1]")
         scope = form if await form.count() else frame
         users = scope.locator('input:not([type="password"]):not([type="hidden"]):not([type="submit"]):not([type="checkbox"]):not([type="radio"]):not([readonly]):not([disabled]):visible')
@@ -58,10 +67,13 @@ async def recover(session, bus=None, agent=""):
             if not any(s in text.casefold() for s in ("service unavailable", "bad gateway", "temporarily unavailable")):
                 break
     # Reauthentication is allowed only after this session successfully observed work.
-    if session.last_good_url:
+    current_origin = _origin(session.page.url)
+    previous = getattr(session, "last_good_urls", {}).get(current_origin)
+    if not previous and _origin(session.last_good_url) == current_origin:
+        previous = session.last_good_url
+    if previous:
         for frame in session.page.frames:
             if await frame.locator('input[type="password"]:visible').count():
-                previous = session.last_good_url
                 message = await login(session)
                 await consent(session)
                 if bus:

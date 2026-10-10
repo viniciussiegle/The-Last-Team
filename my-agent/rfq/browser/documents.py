@@ -158,30 +158,43 @@ def _filename(url: str, headers: dict[str, str]) -> str:
 
 
 async def _direct(session, url: str) -> str:
-    response = None
-    for redirect_count in range(6):
-        response = await session.context.request.get(url, timeout=30_000, max_redirects=0)
-        if response.status not in {301, 302, 303, 307, 308}:
-            break
-        headers = {key.lower(): value for key, value in response.headers.items()}
-        location = headers.get("location")
-        if not location or redirect_count == 5:
-            raise ValueError("Selected document redirect could not be followed")
-        url = _allowed_url(session, urljoin(url, location))
-    assert response is not None
-    if response.status < 200 or response.status >= 300:
-        raise ValueError(f"Selected document request failed (HTTP {response.status})")
-    headers = {key.lower(): value for key, value in response.headers.items()}
+    proxy_url = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
+    temporary_request = None
+    request = session.context.request
+    if proxy_url and getattr(session, "request_factory", None) is not None:
+        temporary_request = await session.request_factory.new_context(
+            proxy={"server": proxy_url},
+            storage_state=await session.context.storage_state(),
+        )
+        request = temporary_request
     try:
-        content_length = int(headers.get("content-length", "0"))
-    except ValueError:
-        content_length = 0
-    if content_length > MAX_BYTES:
-        raise ValueError("Selected document exceeds the size limit")
-    data = await response.body()
-    if len(data) > MAX_BYTES:
-        raise ValueError("Selected document exceeds the size limit")
-    return _parse_one(data, _filename(url, headers), headers.get("content-type", ""))
+        response = None
+        for redirect_count in range(6):
+            response = await request.get(url, timeout=30_000, max_redirects=0)
+            if response.status not in {301, 302, 303, 307, 308}:
+                break
+            headers = {key.lower(): value for key, value in response.headers.items()}
+            location = headers.get("location")
+            if not location or redirect_count == 5:
+                raise ValueError("Selected document redirect could not be followed")
+            url = _allowed_url(session, urljoin(url, location))
+        assert response is not None
+        if response.status < 200 or response.status >= 300:
+            raise ValueError(f"Selected document request failed (HTTP {response.status})")
+        headers = {key.lower(): value for key, value in response.headers.items()}
+        try:
+            content_length = int(headers.get("content-length", "0"))
+        except ValueError:
+            content_length = 0
+        if content_length > MAX_BYTES:
+            raise ValueError("Selected document exceeds the size limit")
+        data = await response.body()
+        if len(data) > MAX_BYTES:
+            raise ValueError("Selected document exceeds the size limit")
+        return _parse_one(data, _filename(url, headers), headers.get("content-type", ""))
+    finally:
+        if temporary_request is not None:
+            await temporary_request.dispose()
 
 
 async def _download_control(session, item: dict, element_id: int) -> str:

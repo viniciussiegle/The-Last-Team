@@ -97,12 +97,20 @@ async def orchestrate(run, settings, bus):
                     break
                 bus.emit("phase", "orchestrator", {"phase": "followup", "gaps": calc.gaps})
                 prompt = "Assign targeted follow-up investigations to site workers. Return JSON object mapping roles to task strings. Available roles: " + ", ".join(agents) + "\nGaps: " + json.dumps(calc.gaps) + "\nShared state: " + json.dumps(shared, default=str)
-                reply = await model.complete("planner", [{"role": "system", "content": "You coordinate missing evidence. Return only JSON. Route by observed affordances and task context; facts may live on any site."}, {"role": "user", "content": prompt}], max_tokens=1500)
+                try:
+                    reply = await asyncio.wait_for(model.complete("planner", [{"role": "system", "content": "You coordinate missing evidence. Return only JSON. Route by observed affordances and task context; facts may live on any site."}, {"role": "user", "content": prompt}], max_tokens=1500), timeout=max(1, freeze_at - time.monotonic() - 10))
+                except asyncio.TimeoutError:
+                    break
                 try:
                     assignments = json.loads((reply.content or "").removeprefix("```json").removesuffix("```").strip())
                 except ValueError:
                     break
-                await asyncio.gather(*(agents[role].run(task, max_steps=25, until=freeze_at) for role, task in assignments.items() if role in agents))
+                followups = [asyncio.create_task(agents[role].run(task, max_steps=25, until=freeze_at)) for role, task in assignments.items() if role in agents]
+                if followups:
+                    _, unfinished = await asyncio.wait(followups, timeout=max(0, freeze_at - time.monotonic()))
+                    for task in unfinished:
+                        task.cancel()
+                    await asyncio.gather(*followups, return_exceptions=True)
                 calc = calculate(ledger, context, settings.surcharge_includes_setup, settings.rules_stage == "core")
             for step in calc.trace:
                 bus.emit("trace_step", "rules", step)
@@ -117,7 +125,10 @@ async def orchestrate(run, settings, bus):
                 mailbox = agents.get("mail")
                 if mailbox is None:
                     raise ValueError("Runtime plan did not identify a mailbox worker")
-                result = await submit_frozen(submitter, mailbox, answer, context, end_at)
+                try:
+                    result = await asyncio.wait_for(submit_frozen(submitter, mailbox, answer, context, end_at), timeout=max(1, end_at - time.monotonic()))
+                except asyncio.TimeoutError:
+                    result = {"submitted": False, "reason": "submission deadline reached"}
             bus.emit("run_finished", "orchestrator", {"result": result, "cost": model.total_cost})
             return result
         finally:

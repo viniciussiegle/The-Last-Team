@@ -14,6 +14,22 @@ def element(session, value):
     return item, item["frame"].locator(f'[data-rfq-observe="{int(value)}"]')
 
 
+async def set_value(item, locator, value):
+    """Apply a model-selected form value according to the observed control type."""
+    text = str(value)
+    if item.get("type") in ("checkbox", "radio"):
+        await locator.set_checked(text.casefold() in {"true", "1", "yes", "on", "checked"})
+    elif item.get("type") == "range":
+        await locator.evaluate("(e,v)=>{e.value=v;e.dispatchEvent(new Event('input',{bubbles:true}));e.dispatchEvent(new Event('change',{bubbles:true}));}", text)
+    elif item.get("tag") == "select":
+        try:
+            await locator.select_option(label=text)
+        except Exception:
+            await locator.select_option(value=text)
+    else:
+        await locator.fill(text)
+
+
 async def act(session, action: dict) -> str | dict:
     kind = action["kind"]
     page = session.page
@@ -39,10 +55,7 @@ async def act(session, action: dict) -> str | dict:
         _, locator = element(session, action["id"])
         if kind == "type":
             item, _ = element(session, action["id"])
-            if item.get("type") == "range":
-                await locator.evaluate("(e,v)=>{e.value=v;e.dispatchEvent(new Event('input',{bubbles:true}));e.dispatchEvent(new Event('change',{bubbles:true}));}", str(action.get("text", "")))
-            else:
-                await locator.fill(str(action.get("text", "")))
+            await set_value(item, locator, action.get("text", ""))
             if action.get("submit"):
                 await locator.press("Enter")
         elif kind == "select":
@@ -54,8 +67,8 @@ async def act(session, action: dict) -> str | dict:
             await locator.set_checked(bool(action.get("checked", True)))
     elif kind == "fill":
         for value in action["fields"]:
-            _, locator = element(session, value["id"])
-            await locator.fill(str(value["text"]))
+            item, locator = element(session, value["id"])
+            await set_value(item, locator, value["text"])
         if action.get("submit_id") is not None:
             _, locator = element(session, action["submit_id"])
             await locator.click()

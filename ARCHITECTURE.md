@@ -43,6 +43,8 @@ The deadline freezes the best validated answer early enough to submit.
 - BrowserSession holds page/context/browser, allowed site origin, element map,
   latest snapshot, pending dialogs and popup observations. connect uses the
   supplied CDP browser for its index, launching Chromium only locally.
+  Credential selection, provenance and session-return history use the observed
+  origin and the run-provided site map, including cross-site investigations.
 - `observe(session, max_chars=26000) -> Snapshot` traverses every frame and
   binds numbered visible elements. Snapshot contains text, digest and elements.
 - `act(session, action: dict) -> str` accepts generic actions using observed
@@ -51,6 +53,10 @@ The deadline freezes the best validated answer early enough to submit.
   Qwen, executes selected tools and validates record tools. It shares ledger
   updates and task state. Prompts contain roles, rules and generic vocabulary;
   scenario text is appended only from the current run at runtime.
+  An optional `stop_record` kind ends a narrow fact-retrieval task immediately
+  after one new validated record of that kind is appended. Rejected or duplicate
+  records do not satisfy it. Signing-code retrieval uses this completion rule
+  to preserve the remaining submission time.
 - Event types: run_started, phase, agent_step, relogin, retry, escalation,
   record_added, record_rejected, trace_step, answer_frozen, submit_step,
   run_finished. Step thought summaries are concise decision explanations.
@@ -88,3 +94,31 @@ frame URL; restrict to session.allowed_origins. Use context.request.get for
 observed direct document URLs or Playwright expect_download for controls.
 Parse PDFs, ZIP members, HTML and text in memory, limits 15 MB / 30 members /
 100,000 characters. Never traverse archive paths or write documents in repo.
+
+## Generality holdout contract
+
+`scripts/generality.py --cases N [--out EXTERNAL_DIR] [--prepare-only]`
+freezes SHA-256 hashes of package files (the packaging exclusions apply),
+prompt files, the selected model and relevant configuration. It runs fairplay
+before generation, generates fresh cryptographic random seeds and immediately
+records their retirement in an external manifest. Seeds cannot be supplied or
+reused by the CLI. Expected answers and fixtures never enter the package.
+
+The first gate is a synthetic extraction evaluation using the real
+`BrowserAgent`, `QwenClient`, `BrowserSession`, snapshot/actions and Ledger.
+A loopback HTTP server presents invented tender positions after at least two
+model-chosen navigations. Cases vary labels, path names, table versus cards,
+nested-frame placement, ordering and irrelevant look-alike records. The task
+names a runtime generated reference, and the agent must record its exact
+position identifiers, quantities, units and requirement references. Expected
+records come directly from generated facts, independently of the agent and
+rules engine. No precomputed selector/click sequence reaches the agent.
+
+Each case must have exact expected records, no decoy records, and at least two
+model-chosen browser events. The gate also checks package/config hashes remain
+unchanged. A JSON report outside the checkout contains individual results,
+layout variants, cost, time and all frozen hashes; stdout is only a summary.
+Preparation alone is explicitly not a passing evaluation. This gate tests
+navigation/extraction transfer; full four-site rule and submission transfer
+remains an M5 extension. Separate synthetic rule regressions cover resolver
+invariants and independent decimal arithmetic expectations.

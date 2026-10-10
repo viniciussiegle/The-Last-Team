@@ -6,6 +6,7 @@ import unittest
 import zipfile
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from playwright.async_api import async_playwright
 
@@ -121,6 +122,86 @@ class DocumentParsing(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ValueError, "outside"):
             await open_document(session, 4)
         self.assertEqual(request.urls, ["https://supplier.example.test/docs/spec.txt"])
+
+    async def test_proxy_request_context_uses_browser_cookies_and_is_disposed(self):
+        redirect = _Response(b"", status=302)
+        redirect.headers["location"] = "/files/selected.txt"
+        request = _Request([redirect, _Response(b"Synthetic proxied document", "text/plain")])
+
+        class TemporaryContext:
+            def __init__(self):
+                self.request = request
+                self.disposed = False
+
+            async def get(self, *args, **kwargs):
+                return await self.request.get(*args, **kwargs)
+
+            async def dispose(self):
+                self.disposed = True
+
+        temporary = TemporaryContext()
+
+        class Factory:
+            def __init__(self):
+                self.options = None
+
+            async def new_context(self, **options):
+                self.options = options
+                return temporary
+
+        class BrowserContext:
+            request = SimpleNamespace()
+
+            async def storage_state(self):
+                return {"cookies": [{"name": "synthetic-session", "value": "fixture"}], "origins": []}
+
+        factory = Factory()
+        item = {"href": "selected.txt", "frame": SimpleNamespace(url="https://supplier.example.test/docs/page")}
+        session = SimpleNamespace(elements={4: item}, context=BrowserContext(), request_factory=factory,
+                                  allowed_origins={"https://supplier.example.test"})
+        with patch.dict("os.environ", {"HTTPS_PROXY": "http://proxy.synthetic.test:9000", "HTTP_PROXY": ""}, clear=False):
+            result = await open_document(session, 4)
+
+        self.assertEqual(result, "Synthetic proxied document")
+        self.assertEqual(request.urls, ["https://supplier.example.test/docs/selected.txt",
+                                        "https://supplier.example.test/files/selected.txt"])
+        self.assertEqual(factory.options["proxy"], {"server": "http://proxy.synthetic.test:9000"})
+        self.assertEqual(factory.options["storage_state"]["cookies"][0]["name"], "synthetic-session")
+        self.assertTrue(temporary.disposed)
+
+    async def test_proxy_request_context_is_disposed_after_http_failure(self):
+        request = _Request(_Response(b"unavailable", "text/plain", status=503))
+
+        class TemporaryContext:
+            disposed = False
+
+            async def get(self, *args, **kwargs):
+                return await self.request.get(*args, **kwargs)
+
+            async def dispose(self):
+                self.disposed = True
+
+        temporary = TemporaryContext()
+        temporary.request = request
+
+        class Factory:
+            async def new_context(self, **_options):
+                return temporary
+
+        class BrowserContext:
+            request = SimpleNamespace()
+
+            async def storage_state(self):
+                return {"cookies": [], "origins": []}
+
+        item = {"href": "selected.txt", "frame": SimpleNamespace(url="https://supplier.example.test/docs/page")}
+        session = SimpleNamespace(elements={4: item}, context=BrowserContext(), request_factory=Factory(),
+                                  allowed_origins={"https://supplier.example.test"})
+        with patch.dict("os.environ", {"HTTPS_PROXY": "http://proxy.synthetic.test:9000"}, clear=False):
+            with self.assertRaisesRegex(ValueError, "HTTP 503"):
+                await open_document(session, 4)
+
+        self.assertTrue(temporary.disposed)
 
     async def test_zip_members_are_read_in_memory_without_extracting_paths(self):
         archive = io.BytesIO()

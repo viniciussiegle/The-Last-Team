@@ -13,7 +13,11 @@ async def submit_frozen(agent, mailbox_agent, answer, context, until):
         task = ("The submitter has just requested the signing TAN. Find the NEWEST signing message for this tender now. "
                 "Use the current inbox, refresh/search as observed. Record a TAN with its value and any displayed request/expiry "
                 "time. Ignore older codes. Do not request another TAN. Current time: " + datetime.now(timezone.utc).isoformat())
-        await mailbox_agent.run(task, max_steps=15, until=until)
+        ledger.allow_tan = True
+        try:
+            await mailbox_agent.run(task, max_steps=15, until=until, stop_record="TAN")
+        finally:
+            ledger.allow_tan = False
         records = ledger.of("TAN")
         if len(records) > prior:
             return "Fresh signing TAN: " + records[-1].value

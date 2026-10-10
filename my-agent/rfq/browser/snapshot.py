@@ -27,7 +27,9 @@ SNAPSHOT_JS = r"""({start, expanded}) => {
     const type=e.getAttribute('type')||e.getAttribute('role')||e.tagName.toLowerCase();
     const value=type==='password'?(e.value?'[secret]':''):('value' in e?e.value:'');
     const options=e.tagName==='SELECT'?Array.from(e.options).map(o=>({value:o.value,text:o.text})):undefined;
-    elements.push({id,tag:e.tagName.toLowerCase(),type,label:label.slice(0,350),value,checked:e.checked,
+    const checked=typeof e.checked==='boolean'?e.checked:(['checkbox','radio'].includes(type)?e.getAttribute('aria-checked')==='true':undefined);
+    elements.push({id,tag:e.tagName.toLowerCase(),type,label:label.slice(0,350),value,checked,
+      modal:!!e.closest('dialog[open],[role=dialog],[aria-modal=true]'),
       href:e.getAttribute('href')||undefined,options,disabled:e.matches(':disabled'),readonly:!!e.readOnly,min:e.min,max:e.max});
   }
   const dialogs=Array.from(document.querySelectorAll('dialog,[role=dialog],[aria-modal=true]')).filter(visible).map(e=>e.innerText);
@@ -93,8 +95,12 @@ async def observe(session, max_chars: int = 26000, expanded: str = "") -> Snapsh
             details = f"[{e['id']}] {e['type']} {e['label']}"
             if e.get("value"):
                 details += f" value={e['value']}"
-            if e.get("checked"):
-                details += " checked"
+            if e.get("type") in ("checkbox", "radio"):
+                details += " CHECKED" if e.get("checked") else " UNCHECKED"
+            if e.get("type") == "range":
+                details += f" min={e.get('min')} max={e.get('max')}"
+            if e.get("modal"):
+                details += " MODAL"
             if e.get("options"):
                 details += " options=" + str(e["options"])
             if e.get("href"):
