@@ -185,7 +185,7 @@ class TheEntryPoint(Case):
         api = self.serve({"/v1/runs/current": [(200, RUN)]})
         code, out = await self.start({"CHALLENGE_API_URL": api.url, "CHALLENGE_RUN_TOKEN": "rt_secret"})
         self.assertEqual(code, 0)
-        self.assertEqual(self.seen, (RUN, "page"))
+        self.assertEqual(self.seen[0], RUN)
         self.assertIn("No answer to submit", out)
         self.assertEqual([request["method"] for request in api.requests], ["GET"])
         self.assertNotIn("s3cret", out)

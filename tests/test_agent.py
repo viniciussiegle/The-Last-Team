@@ -1,5 +1,6 @@
 """Regression checks using synthetic data only."""
 
+import asyncio
 import base64
 import unittest
 from uuid import uuid4
@@ -61,7 +62,7 @@ class DocumentFetching(unittest.IsolatedAsyncioTestCase):
         page.goto.assert_not_awaited()
         helper.observed_urls["fixture"].add("https://example.test/search?q=old")
         await helper.navigate("fixture", "/search?q=new")
-        page.goto.assert_awaited_once_with("https://example.test/search?q=new", wait_until="domcontentloaded", timeout=25000)
+        page.goto.assert_awaited_once_with("https://example.test/search?q=new", wait_until="domcontentloaded", timeout=20000)
 
     async def test_selected_form_control_actions(self):
         page = MagicMock(url="https://example.test/", frames=[])
@@ -103,3 +104,37 @@ class DocumentFetching(unittest.IsolatedAsyncioTestCase):
         helper = BrowserTools({"access": [{"siteId": "fixture", "url": page.url}]}, {"fixture": page})
         with self.assertRaises(ValueError):
             await helper.read_document("fixture", "https://example.test/unseen")
+
+
+class Deadlines(unittest.IsolatedAsyncioTestCase):
+    async def test_a_blocked_browser_call_cannot_stall_a_worker(self):
+        import json as json_
+        import time as time_
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+        from types import SimpleNamespace
+        import rfq_agent
+
+        call = SimpleNamespace(id="c1", function=SimpleNamespace(name="inspect_page",
+                                                                  arguments=json_.dumps({"site": "s"})))
+        message = MagicMock(content="", tool_calls=[call])
+        message.model_dump = lambda **_: {}
+        client = MagicMock()
+        client.chat.completions.create = AsyncMock(return_value=SimpleNamespace(choices=[SimpleNamespace(message=message)]))
+        helper = MagicMock(pages={"s": object()})
+
+        async def blocked(*_args, **_kwargs):
+            await asyncio.sleep(3600)
+        helper.inspect = blocked
+        old_floor = rfq_agent.TOOL_TIMEOUT_FLOOR
+        rfq_agent.TOOL_TIMEOUT_FLOOR = 0.5
+        try:
+            with TemporaryDirectory() as folder:
+                shared = rfq_agent.Shared({"brief": "", "access": []}, Path(folder) / "trace.jsonl")
+                started = time_.monotonic()
+                result = await rfq_agent.worker("t", client, shared, helper, rfq_agent.INVESTIGATION_TOOLS, "s", "o",
+                                                time_.monotonic() + 2, "done")
+        finally:
+            rfq_agent.TOOL_TIMEOUT_FLOOR = old_floor
+        self.assertEqual(result, {"summary": "deadline reached"})
+        self.assertLess(time_.monotonic() - started, 30)

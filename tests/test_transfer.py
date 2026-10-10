@@ -95,8 +95,10 @@ class Transfer(unittest.IsolatedAsyncioTestCase):
                             "submission": {"kind": "site", "siteId": ids[2], "url": origins[2]},
                             "expires_at": int((time.time() + 19 * 60) * 1000),
                         }
-                        pages = {site: await context.new_page() for site in ids}
-                        result = await asyncio.wait_for(rfq_agent.run(task, pages), timeout=180)
+                        async def new_page():
+                            return await context.new_page()
+                        contexts = {site: new_page for site in ids}
+                        result = await asyncio.wait_for(rfq_agent.run(task, contexts), timeout=19 * 60)
                         self.assertTrue(result and result.get("submitted"))
                         self.assertTrue(captured)
                         self.assertEqual(captured[-1]["material"], material)

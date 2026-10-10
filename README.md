@@ -6,26 +6,33 @@ interprets the evidence, calculates a bid, and completes the portal's TAN signin
 
 ## Architecture
 
+```
+brief + run contract
+   │
+   ├─ investigator per website (Qwen tool loop, own tab; may delegate a disjoint part to a helper)
+   │      └─ reports typed evidence records ─► shared board ◄─ every investigator sees new records
+   │
+   ├─ pricing.calculate_bid: governing records (exact reference, latest dated, withdrawals,
+   │      current revision, scoped amendments) + the brief's bid rules in Decimal arithmetic
+   │
+   └─ submission worker (Qwen tool loop): enters the calculated bid, retrieves the TAN, signs
+```
+
 | File | Responsibility |
 | --- | --- |
-| `agent.py` | Load the task, attach to the supplied browser, and create a tab for each site |
-| `rfq_agent.py` | Model/tool loop, deadline awareness, evidence memory and submission confirmation |
-| `browser_tools.py` | Page observations, browser actions, document extraction and Decimal arithmetic |
-| `browsers.py` | Attach over CDP in the sandbox; launch Chromium only for local development |
-| `models.py` | Hosted model clients using the platform's proxy |
-| `run.py` | Starter kit run contract and API submission plumbing |
+| `agent.py` | Load the run, attach one browser per website (tabs share its session) |
+| `rfq_agent.py` | Investigator/helper/submitter tool loops, shared board, deadlines, receipt check |
+| `pricing.py` | Evidence record schema and validation, governing-record resolution, bid arithmetic |
+| `browser_tools.py` | Page reading (incl. collapsed details, tooltips, canvas labels; no hidden decoys), actions, form sequences, multi-page reads, document extraction |
+| `browsers.py`, `models.py`, `run.py` | Starter kit plumbing: CDP browsers, hosted models, run contract |
 | `dev.py` | Load scouting exports as data and start a local run |
-| `agent.json` | Reproducible setup and sandbox entry point |
 
-The browser tools expose visible controls, frames, expandable documents and screenshots.
-The model selects each navigation, search and document. PDF, ZIP, DOCX and text extraction
-is restricted to an observed document URL. Exact arithmetic uses Decimal with explicit
-half-up rounding. Previous observations and model-selected notes remain available through
-the `recall` and `remember` tools. Browser errors return a fresh observation for recovery.
-
-The agent has a 19-minute working budget, bounded by the actual run deadline. It prompts
-the model to finish a signed partial bid when time is short. A saved draft is insufficient:
-the agent must see confirmation on the tender portal before reporting completion.
+The model chooses every navigation target, search, document and decision. Helpers only execute a
+model-chosen action (a page or several selected pages to read, a form sequence, a result set to
+paginate) and do the arithmetic. Records are validated on arrival, so the model fixes malformed
+evidence immediately. Missing evidence becomes a named gap and leaves its answer field blank; it is
+never guessed. Every browser action is time-bounded, investigation has a hard stop, and the
+submission starts in fresh tabs with time reserved for the TAN signature.
 
 ## Generalization to new websites
 
