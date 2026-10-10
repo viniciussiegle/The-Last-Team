@@ -32,6 +32,22 @@ Claude Code). Interfaces are in ARCHITECTURE.md, status in PROGRESS.md.
   piling them on. Prefer one small, smart mechanism over several defensive
   layers, and verify on live runs. Elegance of the system is judged.
 
+- No runs until the human says so (2026-10-11): no sandbox test runs and no local
+  agent runs, because the platform is being upgraded and results would mislead.
+  Reading code, logs and scores, and offline tests, are fine.
+- Nothing is submitted from `claude-build`. The team's latest passing submission
+  (78.1, from a teammate's code line) is what goes into the final run.
+- Fair play (human, 2026-10-11): get the best results first, then revisit the
+  helper that opens views the model names by label before any submission.
+
+## The team's 78.1 agent
+
+A teammate's agent scores 78.1. Its whole loss is four base prices, caused by
+its number parser joining every digit of a value that carries a note. The fix
+is on the local branch `claude-patch-78`, checked out as a separate working
+copy next to this one (`../The-Last-Team-78`): one commit importing the scored
+package, one commit with the fix and two tests. It has not been test-run.
+
 ## Roles
 
 The main session is Astra: plan, interfaces, resolver, rules engine, agent
