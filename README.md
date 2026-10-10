@@ -1,15 +1,14 @@
 # Atira starter kit
 
-A minimal starting point, not an agent. It does the platform plumbing: it reads the run, attaches to the run's
-browsers and shows how to call the free hosted models. Then it stops at `solve()` in `agent.py`, the place for your
-agent. Out of the box it exits without an answer.
+A starter kit with the run plumbing and a first multi-site research agent. It reads the run, attaches to the run's
+browsers, calls the hosted model and coordinates research in `solve()` in `first_try/agent.py`.
 
 | File | What it does |
 | --- | --- |
 | `run.py` | The run contract: reads the run (`load_run`) and submits an API answer (`submit_answer`) |
 | `browsers.py` | Attaches to the run's browsers over CDP and gets a page (`connect`); locally it starts a Chromium |
 | `models.py` | One call to each hosted model: `ask_qwen` (Qwen3.8-Flash-Next) and `ask_clef` (Cloudflare Clef) |
-| `agent.py` | The entry point: reads the run, connects browser 1, calls `solve(task, page)` and submits what it returns |
+| `agent.py` | The entry point and five-phase, multi-site research agent; submits what `solve(task, page)` returns |
 | `agent.json` | How the sandbox installs (`uv sync`, the versions in `uv.lock`) and runs it; it waits for the hosted `qwen` |
 | `tests/` | The plumbing against fakes |
 
@@ -23,8 +22,19 @@ agent. Out of the box it exits without an answer.
 - `task["answer_schema"]`: the JSON Schema of the answer.
 
 For an `api` submission, return the answer and `main()` submits it: `202` is accepted and final, `400` lists the
-issues to fix. For a `site` submission, enter the answer on that website yourself and return `None`. Reading pages,
-acting on them and working out the answer are yours to build.
+issues to fix. For a `site` submission, the agent enters the final answer on the designated website and returns
+`None` after the submission worker runs.
+
+The implementation coordinates research in five phases:
+
+1. The master summarizes the brief, answer schema, constraints, available tools and likely source sites.
+2. One reconnaissance worker per site reports relevant page contents, how it reached them, evidence, related sites and obstacles.
+3. The master makes a focused research plan for each site based on those reports.
+4. Workers revisit the sites and return targeted facts with source URLs and unresolved questions.
+5. The master combines the reports, including evidence that must be joined across sites, and creates the schema-shaped answer.
+
+Website workers use a pool of at most four tabs. They can browse, search and filter; login credentials are used locally
+and are not sent in model prompts. Page content is treated as untrusted evidence.
 
 Mind the clock: a scored run has 20 minutes, and `run.seconds_left(task)` says how many seconds are left. Every part
 of the answer scores on its own, so submit your best answer about a minute before the end rather than keep
