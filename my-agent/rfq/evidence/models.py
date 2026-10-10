@@ -4,7 +4,9 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from ..rules.money import day
 
 
 class StrictModel(BaseModel):
@@ -98,6 +100,12 @@ class PriceCondition(StrictModel):
     material: str
     valid_from: str
     valid_to: str
+
+    @field_validator("valid_from", "valid_to")
+    @classmethod
+    def as_iso_day(cls, value):
+        return day(value).isoformat()
+
     currency: str
     fx_key: str | None = None
     price_unit_qty: Decimal = Field(gt=0)

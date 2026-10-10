@@ -6,7 +6,7 @@ from decimal import Decimal, ROUND_CEILING
 
 from ..evidence.resolver import normalized, resolve, timestamp
 from .allocation import largest_remainder, marginal_credit
-from .money import D, cents
+from .money import D, cents, day
 
 
 @dataclass
@@ -18,7 +18,7 @@ class Calculation:
 
 
 def on_date(value):
-    return date.fromisoformat(str(value)[:10])
+    return day(value)
 
 
 def calculate(ledger, context, include_setup_in_surcharge=True, core_only=False):
@@ -128,12 +128,12 @@ def calculate(ledger, context, include_setup_in_surcharge=True, core_only=False)
     approval = payload("discount_approval")
     goods_total = cents(sum((line["goods"] for line in lines.values()), Decimal(0)))
     discount = D(approval.get("percent", 0))
-    if approval.get("min_order_value") is not None:
+    if approval.get("min_order_value") is not None and goods_total < D(approval["min_order_value"]):
+        # Goods values only add up, so a minimum already reached by the priced positions is reached for certain;
+        # one not yet reached stays open while positions are missing.
         if len(lines) != len(resolved.positions):
             missing("Conditional discount requires all undiscounted position goods values")
-            discount = Decimal(0)
-        elif goods_total < D(approval["min_order_value"]):
-            discount = Decimal(0)
+        discount = Decimal(0)
     answer["discount_percent"] = discount
     trace(None, "order_discount", {"approval": approval, "undiscounted_goods": goods_total}, discount)
     pools = {}

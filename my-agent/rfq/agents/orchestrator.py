@@ -12,7 +12,9 @@ from ..llm.clients import QwenClient
 from .base import BrowserAgent
 from .base import function
 from ..evidence.ledger import Ledger
-from ..rules.engine import calculate
+from decimal import Decimal
+
+from ..rules.engine import Calculation, calculate
 from ..submit.answer import validate_answer
 from ..submit.watchdog import deadlines
 from .submitter import submit_frozen
@@ -55,8 +57,20 @@ async def plan_context(model, run):
     return json.loads(reply.tool_calls[0].function.arguments)
 
 
+def answer_from(ledger, context, settings, bus):
+    """The best answer the evidence supports. A run without an answer scores nothing, so a calculation that
+    fails still yields the decision and reference, with the failure listed as a gap."""
+    try:
+        return calculate(ledger, context, settings.surcharge_includes_setup, settings.rules_stage == "core")
+    except Exception as error:
+        bus.emit("calculation_failed", "rules", {"error": f"{type(error).__name__}: {str(error)[:300]}"})
+        answer = {"tender_reference": context["reference"], "decision": "bid", "currency": "EUR",
+                  "discount_percent": Decimal(0), "positions": [], "total_net": Decimal(0)}
+        return Calculation(answer, gaps=[f"Calculation failed: {type(error).__name__}: {str(error)[:200]}"])
+
+
 TASKS = {
-    "tender": "Find the exact tender and record TenderInfo, every TenderPosition and ALL clarification/Q&A entries, including withdrawals, amendments and commercial/packaging/delivery/setup/bonus keys. Page through the model-selected clarification result set. Open relevant tender documents when needed. Preserve dates, revision and requirement references. After facts, prepare registration/interest if required, but do not enter prices or sign. Tell others when all positions/Q&A are recorded.",
+    "tender": "Find the exact tender. First record TenderInfo and every TenderPosition from its bill of quantities, all in one call: the positions are needed by everyone else. Then record ALL clarification/Q&A entries, including withdrawals, amendments and commercial/packaging/delivery/setup/bonus keys. Page through the model-selected clarification result set. Open relevant tender documents when needed. Preserve dates, revision and requirement references. After facts, prepare registration/interest if required, but do not enter prices or sign. Tell others when all positions/Q&A are recorded.",
     "spec": "Find the technical specification for this tender, identify the revision explicitly marked current, and record SpecRevision with all requirements and catalogue groups, exact normalized attributes, pieces per set and usable/nominal stroke. Inspect superseded versions as candidates only when needed to establish revision status. Open the chosen ZIP/PDF/iframe documents. Share groups/requirements promptly so ERP can search. Do not calculate prices.",
     "erp": "Orient in the ERP and learn material/group searches. Watch shared evidence for specification catalogue groups and amended requirements. Search EACH required group precisely, inspect all candidates and record Material attributes/status, stock/lead times, carton size, surcharge and allocation masses, index/formula and ordinary setup fee. Record all dated PriceCondition entries/scales/currency/price units/FX keys for matching candidates. Record SearchCoverage only when every result in the selected group is inspected. Need_help for missing groups while continuing independent orientation; never use an empty broad catalogue crawl. Do not decide no_bid from missing evidence. Record evidenced zero fees/mass explicitly.",
     "mail": "Identify the logged-in bidder mailbox address/domain and record it in TenderInfo. Search by exact tender reference AND each relevant topic, checking inbox AND archive and all result pages. Record all candidate MailRecord approvals with sender/date/reference and structured payloads, including newer future or unrelated records so resolver can reject them. Collect discount approval, commercial clauses, technical reserve, packaging tariff, delivery commitment, FX fixing, setup pools, project bonus and metal index rates with validity windows. Read each full message; preserve raw clause text, do not calculate. Shared Q&A/spec/ERP may reveal keys or groups. Do not request a signing TAN yet."
@@ -91,7 +105,7 @@ async def orchestrate(run, settings, bus):
             for task in pending:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
-            calc = calculate(ledger, context, settings.surcharge_includes_setup, settings.rules_stage == "core")
+            calc = answer_from(ledger, context, settings, bus)
             # Missing facts are routed by a runtime planner to any site, even if its role differs.
             for round_index in range(3):
                 if calc.complete or time.monotonic() >= freeze_at - 20:
@@ -112,7 +126,7 @@ async def orchestrate(run, settings, bus):
                     for task in unfinished:
                         task.cancel()
                     await asyncio.gather(*followups, return_exceptions=True)
-                calc = calculate(ledger, context, settings.surcharge_includes_setup, settings.rules_stage == "core")
+                calc = answer_from(ledger, context, settings, bus)
             for step in calc.trace:
                 bus.emit("trace_step", "rules", step)
             answer = validate_answer(calc.answer, run["answer_schema"])
