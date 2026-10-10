@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import time
 import unittest
 from pathlib import Path
 
@@ -9,10 +10,10 @@ from playwright.async_api import async_playwright
 PACKAGE = Path(__file__).resolve().parents[1] / "my-agent"
 sys.path.insert(0, str(PACKAGE))
 
-from rfq.browser.actions import act  # noqa: E402
+from rfq.browser.actions import Blocked, act, act_many  # noqa: E402
 from rfq.browser.session import BrowserSession  # noqa: E402
-from rfq.browser.snapshot import observe  # noqa: E402
-from rfq.browser.guards import login, recover  # noqa: E402
+from rfq.browser.snapshot import PageUnresponsive, observe  # noqa: E402
+from rfq.browser.guards import abandon, login, recover  # noqa: E402
 
 
 class ObservedActions(unittest.IsolatedAsyncioTestCase):
@@ -295,6 +296,151 @@ class ObservedActions(unittest.IsolatedAsyncioTestCase):
         button_line = next(line for line in clear.text.splitlines()
                            if line.startswith("[") and "Synthetic target" in line)
         self.assertNotIn("OBSCURED", button_line)
+
+    async def test_batch_keeps_its_targets_when_a_notice_appears_and_renumbers_controls(self):
+        await self.page.set_content(
+            '<main><button id="first" aria-label="synthetic first" '
+            'onclick="const d=document.createElement(\'section\');d.innerHTML='
+            '\'<button>synthetic notice close</button><a href=/synthetic-notice>synthetic notice link</a>\';'
+            'document.body.prepend(d)">One</button>'
+            '<input id="field" aria-label="synthetic field">'
+            '<button id="second" aria-label="synthetic second" onclick="document.body.dataset.second=\'yes\'">Two</button></main>'
+        )
+        first = await self.observed_id("#first")
+        field = int(await self.page.locator("#field").get_attribute("data-rfq-observe"))
+        second = int(await self.page.locator("#second").get_attribute("data-rfq-observe"))
+
+        result = await act_many(self.session, [{"kind": "click", "id": first},
+                                              {"kind": "type", "id": field, "text": "synthetic text"},
+                                              {"kind": "click", "id": second}])
+
+        self.assertEqual(await self.page.locator("#field").input_value(), "synthetic text")
+        self.assertEqual(await self.page.locator("body").get_attribute("data-second"), "yes")
+        self.assertNotIn("skipped", result)
+        # The inserted controls really did shift the numbering the model saw.
+        self.assertNotEqual(int(await self.page.locator("#second").get_attribute("data-rfq-observe")), second)
+
+    async def test_batch_follows_dependent_dropdowns_through_rerenders(self):
+        await self.page.set_content(
+            '<form id="f"></form><script>'
+            'const sizes={"11":["210","340"],"13":["560"]};let size="",depth="";'
+            'function draw(){document.getElementById("f").innerHTML='
+            '`<select aria-label="synthetic size"><option value="">choose</option>${Object.keys(sizes).map(s=>`<option ${s===size?"selected":""}>${s}</option>`).join("")}</select>`+'
+            '`<select aria-label="synthetic depth" ${size?"":"disabled"}><option value="">choose</option>${(sizes[size]||[]).map(d=>`<option ${d===depth?"selected":""}>${d}</option>`).join("")}</select>`+'
+            '`<button type="button" aria-label="synthetic apply">Apply</button>`;'
+            'document.querySelector("button").onclick=()=>{size=document.querySelectorAll("select")[0].value;'
+            'depth=document.querySelectorAll("select")[1].value;draw()};}draw();</script>'
+        )
+        size = await self.observed_id('select[aria-label="synthetic size"]')
+        depth = int(await self.page.locator('select[aria-label="synthetic depth"]').get_attribute("data-rfq-observe"))
+        apply = int(await self.page.locator("button").get_attribute("data-rfq-observe"))
+
+        result = await act_many(self.session, [{"kind": "select", "id": size, "option": "13"},
+                                              {"kind": "click", "id": apply},
+                                              {"kind": "select", "id": depth, "option": "560"},
+                                              {"kind": "click", "id": apply}])
+
+        self.assertNotIn("skipped", result)
+        self.assertEqual(await self.page.locator('select[aria-label="synthetic depth"]').input_value(), "560")
+
+    async def test_batch_never_retargets_a_lookalike_link_after_reordering(self):
+        await self.page.set_content(
+            '<button id="shuffle" aria-label="synthetic shuffle" onclick="const p=document.getElementById(\'links\');'
+            'p.append(p.firstElementChild)">Shuffle</button>'
+            '<p id="links"><a href="#synthetic-real" onclick="document.body.dataset.opened=\'real\'">Open</a>'
+            '<a href="#synthetic-decoy" onclick="document.body.dataset.opened=\'decoy\'">Open</a></p>'
+        )
+        shuffle = await self.observed_id("#shuffle")
+        real = int(await self.page.locator('a[href="#synthetic-real"]').get_attribute("data-rfq-observe"))
+
+        await act_many(self.session, [{"kind": "click", "id": shuffle}, {"kind": "click", "id": real}])
+
+        self.assertEqual(await self.page.locator("body").get_attribute("data-opened"), "real")
+
+    async def test_batch_stops_when_a_target_is_gone(self):
+        await self.page.set_content(
+            '<button id="remove" aria-label="synthetic remove" onclick="document.getElementById(\'gone\').remove()">Remove</button>'
+            '<button id="gone" aria-label="synthetic gone" onclick="document.body.dataset.clicked=\'yes\'">Gone</button>'
+            '<button id="after" aria-label="synthetic after" onclick="document.body.dataset.after=\'yes\'">After</button>'
+        )
+        remove = await self.observed_id("#remove")
+        gone = int(await self.page.locator("#gone").get_attribute("data-rfq-observe"))
+        after = int(await self.page.locator("#after").get_attribute("data-rfq-observe"))
+
+        result = await act_many(self.session, [{"kind": "click", "id": remove}, {"kind": "click", "id": gone},
+                                              {"kind": "click", "id": after}])
+
+        self.assertIn("no longer present", result)
+        self.assertIn("skipped", result)
+        self.assertIsNone(await self.page.locator("body").get_attribute("data-after"))
+
+    async def test_covered_control_is_refused_quickly_and_names_what_covers_it(self):
+        await self.page.set_content(
+            '<button id="target" aria-label="synthetic target">Target</button>'
+            '<dialog open aria-label="Synthetic survey" style="position:fixed;inset:0;width:100%;height:100%">'
+            '<button>Synthetic close</button></dialog>'
+        )
+        target = await self.observed_id("#target")
+        started = time.monotonic()
+
+        with self.assertRaises(Blocked) as refused:
+            await act(self.session, {"kind": "click", "id": target})
+
+        self.assertLess(time.monotonic() - started, 6)
+        self.assertIn("Synthetic survey", str(refused.exception))
+        self.assertLess(len(str(refused.exception)), 300)
+
+    async def test_temporary_failure_page_is_retried_through_its_own_control(self):
+        await self.page.set_content(
+            '<h1>Dienst vorübergehend nicht verfügbar</h1>'
+            '<a href="#" onclick="document.body.innerHTML=\'<h1>Synthetic work area</h1>\';return false">Erneut versuchen</a>'
+        )
+
+        await recover(self.session)
+
+        self.assertEqual(await self.page.locator("h1").inner_text(), "Synthetic work area")
+        self.assertIn("A temporary error page was retried automatically.", self.session.notices)
+
+    async def test_form_page_mentioning_an_outage_is_left_untouched(self):
+        await self.page.set_content(
+            '<p>Service unavailable for the synthetic lookup; enter the value manually.</p>'
+            '<input aria-label="synthetic entry"><a href="#" onclick="document.body.dataset.retried=\'yes\'">Retry</a>'
+        )
+        await self.page.locator("input").fill("synthetic unsaved value")
+
+        await recover(self.session)
+
+        self.assertEqual(await self.page.locator("input").input_value(), "synthetic unsaved value")
+        self.assertIsNone(await self.page.locator("body").get_attribute("data-retried"))
+        self.assertEqual(self.session.notices, [])
+
+    async def test_busy_page_fails_observation_within_the_limit_instead_of_blocking(self):
+        await self.page.set_content('<p>synthetic busy page</p>')
+        await self.page.evaluate("setTimeout(() => { for (;;) {} }, 50)")
+        await self.page.wait_for_timeout(200)
+        started = time.monotonic()
+
+        with self.assertRaises(PageUnresponsive):
+            await observe(self.session)
+
+        self.assertLess(time.monotonic() - started, 12)
+
+    async def test_unresponsive_tab_is_replaced_by_a_working_one(self):
+        await self.page.set_content('<p>synthetic busy page</p>')
+        await self.page.evaluate("setTimeout(() => { for (;;) {} }, 50)")
+        await self.page.wait_for_timeout(200)
+        stuck = self.session.page
+        self.session.last_good_url = "data:text/html,<p>synthetic restored page</p>"
+        started = time.monotonic()
+
+        await abandon(self.session)
+        snapshot = await observe(self.session)
+
+        self.assertLess(time.monotonic() - started, 25)
+        self.assertIsNot(self.session.page, stuck)
+        self.assertIn("synthetic restored page", snapshot.text)
+        self.assertIn("stopped responding", snapshot.text)
+        self.assertTrue(stuck.is_closed())
 
 
 if __name__ == "__main__":

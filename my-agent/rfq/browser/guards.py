@@ -10,6 +10,19 @@ def _origin(url):
     return f"{parts.scheme}://{parts.netloc}"
 
 
+# Generic wording of transient server failures and of a retry control, in the languages the sites may use.
+TEMPORARY_FAILURE = re.compile(
+    r"service unavailable|bad gateway|gateway time-?out|temporarily unavailable|try again later"
+    r"|vor[uü]bergehend nicht verf[uü]gbar|derzeit nicht verf[uü]gbar|zurzeit nicht verf[uü]gbar"
+    r"|sp[aä]ter erneut versuchen", re.I)
+RETRY_CONTROL = re.compile(r"^\s*(erneut versuchen|nochmals? versuchen|wiederholen|retry|try again)\s*$", re.I)
+
+
+def temporary_failure(text: str) -> bool:
+    """A short page that only reports a transient failure, not a working page that mentions one."""
+    return len(text) < 1500 and bool(TEMPORARY_FAILURE.search(text))
+
+
 async def consent(session):
     """Dismiss generic cookie consent using only consent-related page text."""
     for frame in session.page.frames:
@@ -49,6 +62,26 @@ async def login(session) -> str:
     return "No visible password form found."
 
 
+async def abandon(session, bus=None, agent=""):
+    """Replace a tab that stopped responding with a fresh one at the last working address."""
+    stuck = session.page
+    session.page = await session.context.new_page()
+    session.install_handlers(session.page)
+    target = session.last_good_urls.get(_origin(session.last_good_url), session.last_good_url) or session.site["url"]
+    try:
+        await session.page.goto(target, wait_until="domcontentloaded", timeout=15000)
+    except Exception:
+        pass
+    try:
+        # Closing is a browser-level request, so it does not depend on the stuck tab answering.
+        await asyncio.wait_for(stuck.close(), 3)
+    except Exception:
+        pass
+    session.notices.append("The previous tab stopped responding and was replaced; unsaved entries in it are lost.")
+    if bus:
+        bus.emit("retry", agent, {"reason": "unresponsive tab replaced"})
+
+
 async def recover(session, bus=None, agent=""):
     if session.page.is_closed():
         remaining = [page for page in session.context.pages if not page.is_closed()]
@@ -67,14 +100,30 @@ async def recover(session, bus=None, agent=""):
         text = await session.page.locator("body").inner_text(timeout=1200)
     except Exception:
         return
-    if len(text) < 3000 and any(s in text.casefold() for s in ("service unavailable", "bad gateway", "temporarily unavailable")):
+    # A page with form fields is someone's work in progress: never retry or reload it here, whatever it says.
+    try:
+        has_form = await session.page.locator("input:not([type=hidden]):visible, select:visible, textarea:visible").count() > 0
+    except Exception:
+        has_form = True
+    if temporary_failure(text) and not has_form:
         for attempt in range(4):
             if bus:
                 bus.emit("retry", agent, {"attempt": attempt + 1, "reason": "temporary page failure"})
-            await asyncio.sleep(min(2 ** attempt, 8))
-            await session.page.reload(wait_until="domcontentloaded")
-            text = await session.page.locator("body").inner_text()
-            if not any(s in text.casefold() for s in ("service unavailable", "bad gateway", "temporarily unavailable")):
+            await asyncio.sleep(min(0.5 * 2 ** attempt, 4))
+            try:
+                # Prefer the page's own single retry control; reloading can repeat a failed form post.
+                again = session.page.get_by_role("link", name=RETRY_CONTROL).or_(
+                    session.page.get_by_role("button", name=RETRY_CONTROL))
+                if await again.count() == 1:
+                    await again.click(timeout=3500)
+                    await session.page.wait_for_load_state("domcontentloaded", timeout=5000)
+                else:
+                    await session.page.reload(wait_until="domcontentloaded")
+                text = await session.page.locator("body").inner_text(timeout=3000)
+            except Exception:
+                break
+            if not temporary_failure(text):
+                session.notices.append("A temporary error page was retried automatically.")
                 break
     # Reauthentication is allowed only after this session successfully observed work.
     current_origin = _origin(session.page.url)

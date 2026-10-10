@@ -7,9 +7,9 @@ import time
 from pathlib import Path
 from collections import Counter
 
-from ..browser.actions import act
-from ..browser.guards import recover
-from ..browser.snapshot import observe
+from ..browser.actions import act_many
+from ..browser.guards import abandon, recover
+from ..browser.snapshot import PageUnresponsive, observe
 
 
 def function(name, description, properties, required):
@@ -17,16 +17,23 @@ def function(name, description, properties, required):
             "parameters": {"type": "object", "properties": properties, "required": required}}}
 
 
+ACTION = {
+    "kind": {"type": "string", "enum": ["login", "goto", "click", "type", "fill", "select", "check", "press", "scroll", "back", "switch_tab", "look", "extract_table", "expand", "open_document"]},
+    "id": {"type": "integer"}, "url": {"type": "string"}, "text": {"type": "string"},
+    "submit": {"type": "boolean"}, "option": {"type": "string"}, "key": {"type": "string"},
+    "direction": {"type": "string"}, "index": {"type": "integer"}, "section": {"type": "string"},
+    "checked": {"type": "boolean"}, "confirm_final": {"type": "boolean"},
+    "fields": {"type": "array", "items": {"type": "object", "properties": {"id": {"type": "integer"}, "text": {"type": "string"}}, "required": ["id", "text"]}},
+    "submit_id": {"type": "integer"},
+}
+
 TOOLS = [
-    function("browser", "Perform one model-chosen action, then observe again. IDs come from the latest snapshot.", {
-        "kind": {"type": "string", "enum": ["login", "goto", "click", "type", "fill", "select", "check", "press", "scroll", "back", "switch_tab", "look", "extract_table", "expand", "open_document"]},
-        "id": {"type": "integer"}, "url": {"type": "string"}, "text": {"type": "string"},
-        "submit": {"type": "boolean"}, "option": {"type": "string"}, "key": {"type": "string"},
-        "direction": {"type": "string"}, "index": {"type": "integer"}, "section": {"type": "string"},
-        "checked": {"type": "boolean"}, "confirm_final": {"type": "boolean"},
-        "fields": {"type": "array", "items": {"type": "object", "properties": {"id": {"type": "integer"}, "text": {"type": "string"}}, "required": ["id", "text"]}},
-        "submit_id": {"type": "integer"}, "reason": {"type": "string", "maxLength": 200}
-    }, ["kind", "reason"]),
+    function("browser", "Act on the page, then observe again. IDs come from the latest snapshot. Give one action, or "
+             "actions=[...] to run several in order from this same observation when later steps need no new reading.", {
+        **ACTION,
+        "actions": {"type": "array", "maxItems": 14, "items": {"type": "object", "properties": ACTION, "required": ["kind"]}},
+        "reason": {"type": "string", "maxLength": 200}
+    }, ["reason"]),
     function("record", "Append a typed fact grounded in the observed page or chosen document. Follow the supplied record schema.", {
         "kind": {"type": "string"}, "data": {"type": "object"},
         "frame_path": {"type": "string", "description": "Observed source frame path, such as frame/0, when the evidence is in a nested frame."},
@@ -65,6 +72,17 @@ class BrowserAgent:
             for site in run.get("access", []):
                 for value in (site.get("credentials") or {}).values():
                     bus.add_secret(value)
+
+    def scrub(self, text: str) -> str:
+        """Keep credentials, session headers and the run token out of anything returned to the model."""
+        for site in [self.session.site, *self.session.sites_by_origin.values()]:
+            for value in (site.get("credentials") or {}).values():
+                if isinstance(value, str) and value:
+                    text = text.replace(value, "[credential]")
+        text = re.sub(r"(?im)(cookie|authorization|x-api-key):[^\n]*", r"\1: [redacted]", text)
+        if self.settings.run_token:
+            text = text.replace(self.settings.run_token, "[run token]")
+        return text
 
     async def summarize(self):
         reply = await self.model.complete(self.name, [
@@ -173,18 +191,20 @@ class BrowserAgent:
                         if browser_used:
                             tool_result += "Additional browser action deferred; IDs require a new observation.\n"
                             continue
-                        if args.get("confirm_final") and not submit:
+                        batch = args.get("actions") or [{k: v for k, v in args.items() if k not in ("actions", "reason")}]
+                        if not all(isinstance(item, dict) and item.get("kind") for item in batch):
+                            raise ValueError("Each browser action needs a kind")
+                        if any(item.get("confirm_final") for item in batch) and not submit:
                             raise ValueError("Binding confirmation is reserved for the frozen-answer submitter")
                         browser_used = True
-                        output = await act(self.session, args)
-                        if isinstance(output, dict) and output.get("image"):
+                        output = await act_many(self.session, batch)
+                        if isinstance(output, dict):
                             image = output["image"]
-                            tool_result += "Screenshot attached.\n"
-                        else:
-                            tool_result += str(output) + "\n"
-                        logged_action = {k: v for k, v in args.items() if k != "reason"}
-                        if submit and args.get("kind") in ("type", "fill"):
-                            logged_action = {"kind": args["kind"], "id": args.get("id"), "values": "[submission fields]"}
+                            output = output["text"]
+                        tool_result += self.scrub(str(output)) + "\n"
+                        logged_action = [{"kind": item["kind"], "id": item.get("id"), "values": "[submission fields]"}
+                                         if submit and item["kind"] in ("type", "fill") else item for item in batch]
+                        logged_action = logged_action[0] if len(logged_action) == 1 else logged_action
                         self.bus.emit("agent_step", self.name, {"step": self.step_count, "goal": task[:200],
                             "thought": args.get("reason", "")[:200], "action": logged_action,
                             "observation_size": len(snapshot.text), "page_url": self.session.page.url})
@@ -195,15 +215,11 @@ class BrowserAgent:
             except asyncio.CancelledError:
                 worker_status[self.name] = "paused at phase deadline"
                 raise
+            except PageUnresponsive:
+                await abandon(self.session, self.bus, self.name)
+                tool_result = "The tab stopped responding and was replaced. Continue from the new observation."
             except Exception as error:
-                tool_result = f"Tool/observation error: {type(error).__name__}: {str(error)[:1500]}. Adapt using a fresh observation."
-                for site in [self.session.site, *self.session.sites_by_origin.values()]:
-                    for value in (site.get("credentials") or {}).values():
-                        if isinstance(value, str) and value:
-                            tool_result = tool_result.replace(value, "[credential]")
-                tool_result = re.sub(r"(?im)(cookie|authorization|x-api-key):[^\n]*", r"\1: [redacted]", tool_result)
-                if self.settings.run_token:
-                    tool_result = tool_result.replace(self.settings.run_token, "[run token]")
+                tool_result = self.scrub(f"Tool/observation error: {type(error).__name__}: {str(error)[:1500]}. Adapt using a fresh observation.")
                 self.bus.emit("retry", self.name, {"step": step, "reason": tool_result})
         worker_status[self.name] = "step limit"
         return {"summary": self.summary, "gaps": ["Step limit reached"]}

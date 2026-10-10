@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 from dataclasses import dataclass
 
@@ -25,7 +26,8 @@ SNAPSHOT_JS = r"""({start, expanded}) => {
     const id=next++; e.setAttribute('data-rfq-observe',String(id));
     let label=e.getAttribute('aria-label')||'';
     if(e.labels&&e.labels.length) label=Array.from(e.labels).map(l=>tidy(l.innerText)).join(' ');
-    label=label||tidy(e.innerText)||e.getAttribute('placeholder')||e.getAttribute('title')||e.getAttribute('name')||'';
+    // A dropdown's own text is its option list, which is reported separately.
+    label=label||(e.tagName==='SELECT'?'':tidy(e.innerText))||e.getAttribute('placeholder')||e.getAttribute('title')||e.getAttribute('name')||'';
     const type=e.getAttribute('type')||e.getAttribute('role')||e.tagName.toLowerCase();
     const value=type==='password'?(e.value?'[secret]':''):('value' in e?e.value:'');
     const options=e.tagName==='SELECT'?Array.from(e.options).map(o=>({value:o.value,text:o.text})):undefined;
@@ -54,6 +56,8 @@ SNAPSHOT_JS = r"""({start, expanded}) => {
     originalNodes.forEach((e,i)=>{
       const s=getComputedStyle(e),copy=clonedNodes[i];
       if(s.display==='none'||s.visibility==='hidden'){copy.remove();return;}
+      // Page text shows a dropdown's current choice; its options are listed once under CONTROLS.
+      if(e.tagName==='SELECT'){copy.replaceWith(document.createTextNode('\n'+tidy(e.selectedOptions[0]?.text||'')+'\n'));return;}
       if(['block','flex','grid','list-item','table-row','table-cell'].includes(s.display)){
         copy.before(document.createTextNode('\n'));copy.after(document.createTextNode('\n'));
       }
@@ -72,20 +76,47 @@ SNAPSHOT_JS = r"""({start, expanded}) => {
 }"""
 
 
+class PageUnresponsive(RuntimeError):
+    """The selected tab did not answer within the observation time limit."""
+
+
+# Page scripts have no timeout of their own; a tab stuck in a navigation would block its worker.
+SETTLE_LIMIT_S = 2.5
+FRAME_LIMIT_S = 6.0
+
+
 async def settle(page):
     try:
         await page.wait_for_load_state("networkidle", timeout=1200)
     except Exception:
         pass
     try:
-        await page.evaluate("""() => new Promise(resolve => {
+        await asyncio.wait_for(page.evaluate("""() => new Promise(resolve => {
           let quiet; const done=()=>{observer.disconnect();clearTimeout(quiet);resolve()};
           const observer=new MutationObserver(()=>{clearTimeout(quiet);quiet=setTimeout(done,150)});
           observer.observe(document,{subtree:true,childList:true,attributes:true});
           quiet=setTimeout(done,150);setTimeout(done,900);
-        })""")
+        })"""), SETTLE_LIMIT_S)
     except Exception:
         pass
+
+
+async def frame_data(frame, next_id, expanded):
+    ancestor = frame
+    while ancestor.parent_frame is not None:
+        container = await ancestor.frame_element()
+        if not await container.is_visible():
+            return None
+        ancestor = ancestor.parent_frame
+    return await frame.evaluate(SNAPSHOT_JS, {"start": next_id, "expanded": expanded})
+
+
+def option_list(options, limit=60):
+    """Each option once: its text, with the form value only where that differs."""
+    shown = [o["text"] if o["value"] in ("", o["text"]) else f"{o['text']} ({o['value']})" for o in options[:limit]]
+    if len(options) > limit:
+        shown.append(f"+{len(options) - limit} more")
+    return " | ".join(shown)
 
 
 async def observe(session, max_chars: int = 26000, expanded: str = "") -> Snapshot:
@@ -95,18 +126,14 @@ async def observe(session, max_chars: int = 26000, expanded: str = "") -> Snapsh
     next_id = 1
     for index, frame in enumerate(session.page.frames):
         try:
-            ancestor = frame
-            visible = True
-            while ancestor.parent_frame is not None:
-                container = await ancestor.frame_element()
-                if not await container.is_visible():
-                    visible = False
-                    break
-                ancestor = ancestor.parent_frame
-            if not visible:
-                continue
-            data = await frame.evaluate(SNAPSHOT_JS, {"start": next_id, "expanded": expanded})
+            data = await asyncio.wait_for(frame_data(frame, next_id, expanded), FRAME_LIMIT_S)
+        except asyncio.TimeoutError:
+            if frame is session.page.main_frame:
+                raise PageUnresponsive("The page did not respond while it was being read") from None
+            continue
         except Exception:
+            continue
+        if data is None:
             continue
         next_id = data["next"]
         frame_path = f"frame/{index}"
@@ -133,7 +160,7 @@ async def observe(session, max_chars: int = 26000, expanded: str = "") -> Snapsh
             if e.get("obstruction"):
                 details += " OBSCURED by " + e["obstruction"]
             if e.get("options"):
-                details += " options=" + str(e["options"])
+                details += " options: " + option_list(e["options"])
             if e.get("href"):
                 details += " href=" + e["href"]
             if e.get("disabled"):

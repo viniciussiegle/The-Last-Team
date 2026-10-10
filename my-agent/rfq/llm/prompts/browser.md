@@ -17,8 +17,18 @@ records preserve previously observed optional fields.
 Call login when a login form appears; it uses credentials without exposing them.
 Handle consent, popups, tabs and nested documents using the observed controls.
 Use look only if the DOM is insufficient; open_document for a chosen document.
-For large pages use expand(section). After actions, IDs may change. Fill can
-enter several current fields and optionally click their save/submit control.
+For large pages use expand(section). Fill can enter several current fields
+and optionally click their save/submit control.
+Every model call costs time, so finish what one observation already tells you
+in a single browser call: pass actions=[...] to run steps in order, such as
+unlocking a gate and then opening the item behind it, completing a short form
+and continuing, or choosing dependent dropdowns with their apply control
+between them. You may name a control that is DISABLED now if an earlier step
+of the same batch enables it, and choose an option that only appears after an
+earlier step when the task already tells you its value. The batch stops at the
+first step that fails or whose control is no longer the one you saw, and
+reports which steps ran. Use a single action when the next step depends on
+content you have not read yet. Reading actions end a batch.
 READONLY controls cannot be edited; DISABLED controls require their visible
 prerequisite first. For a range slider, type(id,text) sets its numeric value,
 or press(key,id) focuses that element before pressing the key. Menus may need

@@ -21,6 +21,11 @@ Claude Code). Interfaces are in ARCHITECTURE.md, status in PROGRESS.md.
 - Remaining checkpoints (stop and ask): before every scored submission; a rule
   ambiguity unresolved after two A/B runs; any fair-play doubt.
 - Ask the human directly whenever something is ambiguous.
+- Working system first (human, 2026-10-10): until a sandbox run scores, do not
+  spend time or tokens on holdout gates, generality evaluations or new unit-test
+  suites. Sandbox test runs against the real sites are the test loop. Keep the
+  existing quick suite green and add tests only where they directly unblock a
+  fix. The generality gates in AGENTS.md resume once a run is eligible.
 
 ## Roles
 
