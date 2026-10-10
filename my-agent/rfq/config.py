@@ -11,6 +11,8 @@ from typing import Mapping
 
 # Published simulated prices of the default hosted model, USD per million tokens.
 QWEN_PRICES = {"input": 0.15, "cached": 0.016, "output": 0.47}
+# Request parameters that switch the default hosted model's reasoning pass off.
+QWEN_PLAIN_ANSWERS = {"chat_template_kwargs": {"enable_thinking": False}}
 
 
 def _json_object(raw: str | None, name: str) -> dict:
@@ -88,7 +90,11 @@ class Settings:
         if not urls and source.get("CDP_URL"):
             urls = [source["CDP_URL"]]
 
+        # The default hosted model answers without a separate reasoning pass: its steps are small choices, and
+        # reasoning tokens roughly doubled the time of every call. MODEL_EXTRA_BODY={} turns reasoning back on.
         extra_body = _json_object(source.get("MODEL_EXTRA_BODY"), "MODEL_EXTRA_BODY")
+        if source.get("MODEL_EXTRA_BODY") is None and source.get("MODEL_BASE_URL_ENV", "QWEN_BASE_URL") == "QWEN_BASE_URL":
+            extra_body = dict(QWEN_PLAIN_ANSWERS)
         prices = {**QWEN_PRICES, **{key: float(value) for key, value in
                                     _json_object(source.get("MODEL_PRICES_USD_PER_M"), "MODEL_PRICES_USD_PER_M").items()}}
         data_dir = Path(source.get("RFQ_DATA_DIR") or _default_data_dir()).expanduser().resolve()
