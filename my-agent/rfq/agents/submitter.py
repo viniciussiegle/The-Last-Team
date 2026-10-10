@@ -53,12 +53,21 @@ async def submit_frozen(agent, mailbox_agent, answer, context, until):
             "Before final confirmation compare the review summary's reference, decision, position material/quantity/price and total "
             "to this answer. Only then click the final submission control with confirm_final=true. Inspect the receipt and call done "
             "with submitted=true and receipt text only if accepted. Saving alone is not submission. "
-            "Do not navigate back after completing later wizard steps; fix in the current step when possible.\n"
+            "Enter only what the frozen answer contains: a position that is not in it is omitted with the form's own "
+            "omit control, never filled from other information. Never use a back control or the browser's back: it "
+            "discards the steps already completed. Always move forward; an entry you doubt is checked on the review step.\n"
             + "Frozen answer: " + json.dumps(answer, default=str, ensure_ascii=False)
             + "\nGerman formatted positions: " + json.dumps(display, ensure_ascii=False)
             + "\nGerman net total: " + german(answer["total_net"])
             + "\nRuntime context: " + json.dumps(context, default=str, ensure_ascii=False))
     agent.bus.emit("submit_step", "submitter", {"status": "starting"})
+    # An expiring session discards the unsaved form, so the one flow that must not be interrupted starts on a
+    # new session instead of the one opened when gathering began.
+    try:
+        await agent.session.context.clear_cookies()
+        await agent.session.page.goto(agent.session.site["url"], wait_until="domcontentloaded", timeout=15000)
+    except Exception:
+        pass
     result = await agent.run(task, max_steps=75, until=until, submit=True)
     agent.bus.emit("submit_step", "submitter", result)
     return result

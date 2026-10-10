@@ -29,6 +29,17 @@ earlier step when the task already tells you its value. The batch stops at the
 first step that fails or whose control is no longer the one you saw, and
 reports which steps ran. Use a single action when the next step depends on
 content you have not read yet. Reading actions end a batch.
+Never page through a list or open row details one at a time. When a result
+set you chose has several pages, or rows that hide a detail such as a date,
+status or note behind a control, call read_all once: next_id is the control
+that leads to the next page, and reveal_ids holds one example of each
+row-detail control. It returns the text of every page with every row's
+detail opened. To read several chosen results, or all tabs of one record, in
+the same call, add open_ids with their links; each is opened and read with
+the same details opened. Choose those links from what the list already shows
+instead of opening everything. Then record everything it shows in your next
+call, as many record calls as needed, before navigating on; the full text is
+shown once. Use look only when the page text does not explain the page.
 READONLY controls cannot be edited; DISABLED controls require their visible
 prerequisite first. For a range slider, type(id,text) sets its numeric value,
 or press(key,id) focuses that element before pressing the key. Menus may need
@@ -47,7 +58,16 @@ Record all relevant candidate evidence, including superseded records, dated
 clarifications, withdrawals and look-alikes with their exact metadata. Code will
 resolve authority/time/revision rules. Never perform monetary arithmetic: record
 raw prices, quantities, units and parameters for the deterministic calculator.
-Never invent a missing value. Use need_help for a precise missing dependency.
+You do not remember earlier pages: only the current observation and the
+previous tool result are in front of you. So record a fact in the same call in
+which you can read it, and never write a record from memory. Every value in a
+record must be readable in that text right now. Copy words exactly as written,
+in the page's language, without translating or tidying them; convert only
+number formats and units as the record contracts ask. Leave an optional field
+out when its value is not shown, and never fill it with a control's label or a
+guess. Text in panels around an item, such as previews, drafts or export
+notices of the application, is not part of the item. Use need_help for a
+precise missing dependency.
 Before done, record the useful evidence; your summary is not an evidence record.
 
 German domain vocabulary: Bohrung/Kolben-Ø=bore; Hub=stroke; nutzbarer Weg=usable

@@ -46,7 +46,8 @@ SNAPSHOT_JS = r"""({start, expanded}) => {
       modal:!!e.closest('dialog[open],[role=dialog],[aria-modal=true]'),
       href:e.getAttribute('href')||undefined,options,disabled:e.matches(':disabled'),readonly:!!e.readOnly,min:e.min,max:e.max});
   }
-  const dialogs=Array.from(document.querySelectorAll('dialog,[role=dialog],[aria-modal=true]')).filter(visible).map(e=>e.innerText);
+  // Named once as a heads-up; the dialog's own text and controls appear in the page text and control list.
+  const dialogs=Array.from(document.querySelectorAll('dialog,[role=dialog],[aria-modal=true]')).filter(visible).map(e=>tidy((e.getAttribute('aria-label')||'')+' '+e.innerText).slice(0,160));
   const sections=Array.from(document.querySelectorAll('h1,h2,h3,summary')).filter(visible).map(e=>tidy(e.innerText));
   const clone=document.body?.cloneNode(true);
   let nav='';
@@ -139,7 +140,7 @@ async def observe(session, max_chars: int = 26000, expanded: str = "") -> Snapsh
         frame_path = f"frame/{index}"
         pieces.append(f"{frame_path}: {data['title']} ({frame.url})")
         if data["dialogs"]:
-            pieces.append("DIALOGS\n" + "\n".join(data["dialogs"]))
+            pieces.extend("DIALOG OPEN: " + text for text in data["dialogs"])
         nav_hash = hashlib.sha256(data["nav"].encode()).hexdigest()
         if nav_hash not in session.nav_hashes:
             pieces.append("Navigation: " + data["nav"])

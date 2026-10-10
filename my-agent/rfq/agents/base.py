@@ -18,13 +18,18 @@ def function(name, description, properties, required):
 
 
 ACTION = {
-    "kind": {"type": "string", "enum": ["login", "goto", "click", "type", "fill", "select", "check", "press", "scroll", "back", "switch_tab", "look", "extract_table", "expand", "open_document"]},
+    "kind": {"type": "string", "enum": ["login", "goto", "click", "type", "fill", "select", "check", "press", "scroll", "back", "switch_tab", "look", "extract_table", "expand", "open_document", "read_all"]},
     "id": {"type": "integer"}, "url": {"type": "string"}, "text": {"type": "string"},
     "submit": {"type": "boolean"}, "option": {"type": "string"}, "key": {"type": "string"},
     "direction": {"type": "string"}, "index": {"type": "integer"}, "section": {"type": "string"},
     "checked": {"type": "boolean"}, "confirm_final": {"type": "boolean"},
     "fields": {"type": "array", "items": {"type": "object", "properties": {"id": {"type": "integer"}, "text": {"type": "string"}}, "required": ["id", "text"]}},
     "submit_id": {"type": "integer"},
+    "next_id": {"type": "integer", "description": "read_all: the control that leads to the next page of this result set"},
+    "reveal_ids": {"type": "array", "items": {"type": "integer"},
+                   "description": "read_all: one example of each control that opens a hidden detail of a row or field"},
+    "open_ids": {"type": "array", "items": {"type": "integer"},
+                 "description": "read_all: links to open and read one after another, such as chosen results or the tabs of one record"},
 }
 
 TOOLS = [
@@ -107,6 +112,7 @@ class BrowserAgent:
         hashes = []
         tool_result = ""
         image = None
+        slow_reads = 0
         for step in range(max_steps or self.settings.max_steps):
             if until and time.monotonic() >= until:
                 worker_status[self.name] = "time limit"
@@ -114,6 +120,7 @@ class BrowserAgent:
             try:
                 await recover(self.session, self.bus, self.name)
                 snapshot = await observe(self.session)
+                slow_reads = 0
                 self.observations.append(snapshot.text)
                 self.observations = self.observations[-3:]
                 logged_snapshot = "[Signing mailbox observation omitted]" if self.ledger and self.ledger.allow_tan else snapshot.text
@@ -129,7 +136,7 @@ class BrowserAgent:
                 known = self.ledger.summary(self.name) if self.ledger else ""
                 evidence_counts = Counter(kind for kind, _, _ in self.ledger.records) if self.ledger else {}
                 remaining_steps = (max_steps or self.settings.max_steps) - step
-                content = f"Steps remaining: {remaining_steps}. Finish with done before exhausting them; state gaps explicitly.\nShared worker updates: {shared[-10000:]}\nEvidence ledger: {known}\nPrevious tool result: {tool_result[-14000:]}\nCURRENT OBSERVATION:\n{snapshot.text}"
+                content = f"Steps remaining: {remaining_steps}. Finish with done before exhausting them; state gaps explicitly.\nShared worker updates: {shared[-10000:]}\nEvidence ledger: {known}\nPrevious tool result: {tool_result[:45000]}\nCURRENT OBSERVATION:\n{snapshot.text}"
                 messages = [{"role": "system", "content": system}, {"role": "user", "content": task_text}]
                 messages.extend(history[-6:])
                 if image:
@@ -216,14 +223,22 @@ class BrowserAgent:
                             "observation_size": len(snapshot.text), "page_url": self.session.page.url})
                     action_notes.append(f"{name}: {json.dumps(args, ensure_ascii=False)}")
                 history.append({"role": "assistant", "content": "\n".join(action_notes)})
-                history.append({"role": "user", "content": "Results: " + tool_result[:8000]})
+                # A long reading is shown once in full; the running history keeps only its start.
+                kept = tool_result if len(tool_result) <= 2500 else tool_result[:1500] + "\n[long result shown once in full; record from it now]"
+                history.append({"role": "user", "content": "Results: " + kept})
                 self.step_count += 1
             except asyncio.CancelledError:
                 worker_status[self.name] = "paused at phase deadline"
                 raise
             except PageUnresponsive:
-                await abandon(self.session, self.bus, self.name)
-                tool_result = "The tab stopped responding and was replaced. Continue from the new observation."
+                # A slow read is simply tried again; only a tab that stays silent is given up.
+                slow_reads += 1
+                if slow_reads >= 3:
+                    slow_reads = 0
+                    await abandon(self.session, self.bus, self.name)
+                    tool_result = "The tab stopped responding and was replaced. Continue from the new observation."
+                else:
+                    await asyncio.sleep(1)
             except Exception as error:
                 tool_result = self.scrub(f"Tool/observation error: {type(error).__name__}: {str(error)[:1500]}. Adapt using a fresh observation.")
                 self.bus.emit("retry", self.name, {"step": step, "reason": tool_result})

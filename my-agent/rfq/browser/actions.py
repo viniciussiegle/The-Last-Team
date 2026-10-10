@@ -34,7 +34,7 @@ async def set_value(item, locator, value):
 CLICK_LIMIT_MS = 4000
 BATCH_LIMIT = 14
 # Their output is what the model asked to read, so nothing may run after them in the same batch.
-READING_KINDS = {"look", "extract_table", "expand", "open_document"}
+READING_KINDS = {"look", "extract_table", "expand", "open_document", "read_all"}
 
 
 class Blocked(ValueError):
@@ -117,6 +117,116 @@ def rebind(action: dict, seen: dict, current: dict) -> dict:
                              for field in rebound["fields"]]
     return rebound
 
+
+def alike(item: dict) -> tuple:
+    """A control's description without its link target, which differs from row to row and page to page."""
+    return signature(item)[:4]
+
+
+def page_lines(text: str) -> list[str]:
+    """What a page says, without its numbered control list and tab list."""
+    return [line for line in text.splitlines() if not re.match(r"\[\d+\] |CONTROLS$|TABS |Sections: ", line)]
+
+
+def field_lines(elements: dict) -> list[str]:
+    """Form fields as text: many pages show their data as the values of read-only fields."""
+    lines = []
+    for key in sorted(elements):
+        item = elements[key]
+        kind, label = item.get("type"), item.get("label") or ""
+        if kind in ("checkbox", "radio"):
+            lines.append(f"{label}: {'checked' if item.get('checked') else 'unchecked'}")
+        elif kind not in ("password", "submit", "button", "reset", "hidden") and item.get("tag") in ("input", "select", "textarea") and item.get("value"):
+            lines.append(f"{label}: {item['value']}")
+    return lines
+
+
+def without_earlier_versions(lines: list[str]) -> list[str]:
+    """Keep a line only in its fullest form: opening a detail repeats the row with the detail inserted."""
+    def grown_from(short: str, long: str) -> bool:
+        if len(long) <= len(short) or len(short) < 6:
+            return False
+        shared = 0
+        while shared < len(short) and short[shared] == long[shared]:
+            shared += 1
+        return long.endswith(short[shared:])
+    return [line for line in lines if not any(grown_from(line, other) for other in lines)]
+
+
+async def read_all(session, action: dict, max_pages: int = 20, limit: int = 45000) -> str:
+    """Read everything the model pointed at in one go.
+
+    The model chooses what to read; this helper only repeats its choices. It names the control that leads to the
+    next page of a result set (next_id), one example of each control that opens a hidden detail of a row or field
+    (reveal_ids), and optionally links to open one after another, such as chosen results or the tabs of one
+    record (open_ids). Every page is read with every such detail opened.
+    """
+    from .snapshot import observe
+    seen = session.elements
+    following = alike(seen[int(action["next_id"])]) if action.get("next_id") is not None and int(action["next_id"]) in seen else None
+    opening = {alike(seen[int(key)]) for key in action.get("reveal_ids") or [] if int(key) in seen}
+    links, skipped = [], 0
+    for key in action.get("open_ids") or []:
+        item = seen.get(int(key))
+        address = urljoin(session.page.url, item["href"]) if item and item.get("href") and item["frame"] is session.page.main_frame else ""
+        if address.startswith(("http:", "https:")) and origin(address) in session.allowed_origins:
+            links.append((item.get("label") or address, address))
+        else:
+            skipped += 1
+
+    async def pages_from_here() -> list[str]:
+        emitted, pages = set(), []
+        for number in range(1, max_pages + 1):
+            snapshot = await observe(session)
+            fresh = [line for line in page_lines(snapshot.text) + field_lines(snapshot.elements) if line not in emitted]
+            # A page may show one opened detail at a time, so the text is taken after each one is opened.
+            for turn in range(len([key for key in snapshot.elements if alike(snapshot.elements[key]) in opening])):
+                like = [key for key in sorted(snapshot.elements) if alike(snapshot.elements[key]) in opening]
+                if turn >= len(like):
+                    break
+                try:
+                    await snapshot.elements[like[turn]]["frame"].locator(f'[data-rfq-observe="{like[turn]}"]').click(timeout=1500)
+                except Exception:
+                    continue
+                snapshot = await observe(session)
+                fresh += [line for line in page_lines(snapshot.text) if line not in emitted and line not in fresh]
+            fresh = without_earlier_versions(fresh)
+            if number > 1 and not fresh:
+                break
+            emitted.update(fresh)
+            pages.append(f"--- page {number} ---\n" + "\n".join(fresh))
+            onward = [key for key in sorted(snapshot.elements) if following and alike(snapshot.elements[key]) == following
+                      and not snapshot.elements[key].get("disabled")]
+            if not onward:
+                break
+            try:
+                await snapshot.elements[onward[0]]["frame"].locator(f'[data-rfq-observe="{onward[0]}"]').click(timeout=CLICK_LIMIT_MS)
+            except Exception as error:
+                pages.append(f"(stopped: the next-page control could not be used: {str(error).splitlines()[0][:120]})")
+                break
+        else:
+            pages.append(f"(stopped after {max_pages} pages; narrow the result set)")
+        return pages
+
+    if not links:
+        parts = await pages_from_here()
+    else:
+        parts, origin_address = [], session.page.url
+        for label, address in links[:12]:
+            try:
+                await session.page.goto(address, wait_until="domcontentloaded")
+                parts.append(f"=== opened: {label[:80]} ===")
+                parts += await pages_from_here()
+            except Exception as error:
+                parts.append(f"=== could not open {label[:80]}: {str(error).splitlines()[0][:120]} ===")
+        try:
+            await session.page.goto(origin_address, wait_until="domcontentloaded")
+        except Exception:
+            pass
+    if skipped:
+        parts.append(f"({skipped} of the open_ids are not links on this page and were not opened; open those yourself)")
+    text = "\n".join(parts)
+    return text if len(text) <= limit else text[:limit] + "\n[cut: too long; choose fewer items]"
 
 async def act_many(session, actions: list[dict]) -> str | dict:
     """Run model-chosen actions in order from one observation, stopping at the first that cannot proceed."""
@@ -216,6 +326,8 @@ async def act(session, action: dict) -> str | dict:
             _, locator = element(session, action["id"])
             return await locator.inner_text()
         return "\n\n".join(await page.locator("table").all_inner_texts()) or "No tables; read the current snapshot."
+    elif kind == "read_all":
+        return await read_all(session, action)
     elif kind == "expand":
         from .snapshot import observe
         return (await observe(session, expanded=action["section"])).text

@@ -26,6 +26,11 @@ Claude Code). Interfaces are in ARCHITECTURE.md, status in PROGRESS.md.
   suites. Sandbox test runs against the real sites are the test loop. Keep the
   existing quick suite green and add tests only where they directly unblock a
   fix. The generality gates in AGENTS.md resume once a run is eligible.
+- Keep it simple and light (human, 2026-10-10, said twice): few tests, few
+  safeguards, no checking of everything. A safeguard added that day (replacing
+  a "stuck" tab) misfired and trapped a worker in a loop, which is the cost of
+  piling them on. Prefer one small, smart mechanism over several defensive
+  layers, and verify on live runs. Elegance of the system is judged.
 
 ## Roles
 

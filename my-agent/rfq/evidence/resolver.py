@@ -84,9 +84,4 @@ def resolve(ledger, context):
             result.mails[mail.kind] = mail
         else:
             result.rejected.append({"kind": "MailRecord", "id": mail.message_id, "reason": "superseded"})
-    for kind, mail in list(result.mails.items()):
-        if mail.confidence == "low":
-            result.gaps.append(f"Clarify low-confidence latest {kind} mail {mail.message_id}; do not revive older records")
-            result.rejected.append({"kind": "MailRecord", "id": mail.message_id, "reason": "latest record awaiting clarification"})
-            del result.mails[kind]
     return result

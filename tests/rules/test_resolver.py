@@ -58,31 +58,20 @@ class MailAuthorityAndRecency(unittest.TestCase):
         self.assertEqual(rejected["approval-other-ref"], "other reference")
         self.assertEqual(rejected["approval-other-sender"], "unauthorized sender")
 
-    def test_bidder_domain_comes_from_tender_info_and_low_confidence_is_a_gap(self):
+    def test_bidder_domain_comes_from_tender_info(self):
         information = TenderInfo(reference=REFERENCE, bidder_domain="Supplier.Example.Test")
         good = mail("known-domain", "8", "2031-04-10T08:00:00+00:00")
-        doubtful = mail("uncertain-clause", "9", SCENARIO, confidence="low", kind="konditionsregeln",
-                        sender="kalkulation")
-        resolved = resolve(FakeLedger(TenderInfo=[information], MailRecord=[good, doubtful]),
+        resolved = resolve(FakeLedger(TenderInfo=[information], MailRecord=[good]),
                            {**CONTEXT, "bidder_domain": "untrusted.example.test"})
         self.assertEqual(resolved.mails["discount_approval"].message_id, "known-domain")
-        self.assertNotIn("konditionsregeln", resolved.mails)
-        self.assertTrue(any("low-confidence" in gap for gap in resolved.gaps))
-        self.assertIn({"kind": "MailRecord", "id": "uncertain-clause",
-                       "reason": "latest record awaiting clarification"}, resolved.rejected)
 
-    def test_newest_low_confidence_approval_does_not_revive_older_approval(self):
+    def test_newest_approval_replaces_the_older_one_even_when_marked_uncertain(self):
         older = mail("approved-earlier", "8", "2031-04-10T08:00:00+00:00")
         newest = mail("uncertain-newest", "15", SCENARIO, confidence="low")
         resolved = resolve(FakeLedger(MailRecord=[older, newest]), CONTEXT)
 
-        self.assertNotIn("discount_approval", resolved.mails)
-        self.assertTrue(any("uncertain-newest" in gap and "do not revive older records" in gap
-                            for gap in resolved.gaps))
-        rejected = {item["id"]: item["reason"] for item in resolved.rejected}
-        self.assertEqual(rejected["uncertain-newest"], "latest record awaiting clarification")
-        self.assertEqual(rejected["approved-earlier"], "superseded")
-
+        self.assertEqual(resolved.mails["discount_approval"].message_id, "uncertain-newest")
+        self.assertIn({"kind": "MailRecord", "id": "approved-earlier", "reason": "superseded"}, resolved.rejected)
 
 class EvidenceSelection(unittest.TestCase):
     def test_withdrawal_chain_restores_prior_change_and_future_withdrawal_is_ignored(self):
