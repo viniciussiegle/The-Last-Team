@@ -39,11 +39,13 @@ TOOLS = [
         "actions": {"type": "array", "maxItems": 14, "items": {"type": "object", "properties": ACTION, "required": ["kind"]}},
         "reason": {"type": "string", "maxLength": 200}
     }, ["reason"]),
-    function("record", "Append a typed fact grounded in the observed page or chosen document. Follow the supplied record schema.", {
+    function("record", "Append a typed fact grounded in the observed page or chosen document. Follow the supplied record schema. "
+             "Give only the contract's fields: no copies of page text, notes or snippets. Several record calls may go in one "
+             "answer, but keep an answer to about eight records and continue in the next one; a long answer is slow and can be cut off.", {
         "kind": {"type": "string"}, "data": {"type": "object"},
         "frame_path": {"type": "string", "description": "Observed source frame path, such as frame/0, when the evidence is in a nested frame."},
         "snippet": {"type": "string", "maxLength": 300}
-    }, ["kind", "data", "snippet"]),
+    }, ["kind", "data"]),
     function("done", "Task complete; summarize what was found and any unresolved gaps.", {
         "summary": {"type": "string"}, "gaps": {"type": "array", "items": {"type": "string"}},
         "submitted": {"type": "boolean"}, "receipt": {"type": "string"}
@@ -140,9 +142,10 @@ class BrowserAgent:
                 known = self.ledger.summary(self.name) if self.ledger else ""
                 evidence_counts = Counter(kind for kind, _, _ in self.ledger.records) if self.ledger else {}
                 remaining_steps = (max_steps or self.settings.max_steps) - step
-                content = f"Steps remaining: {remaining_steps}. Finish with done before exhausting them; state gaps explicitly.\nShared worker updates: {shared[-10000:]}\nEvidence ledger: {known}\nPrevious tool result: {(reading + tool_result)[:45000]}\nCURRENT OBSERVATION:\n{snapshot.text}"
+                # The worker's own memory: one line per step it has taken, so it does not repeat or re-learn.
+                steps_taken = "\n".join(history[-16:]) or "(none yet)"
+                content = f"Steps remaining: {remaining_steps}. Finish with done before exhausting them; state gaps explicitly.\nYour steps so far, oldest first:\n{steps_taken}\nShared worker updates: {shared[-10000:]}\nEvidence ledger: {known}\nPrevious tool result: {(reading + tool_result)[:45000]}\nCURRENT OBSERVATION:\n{snapshot.text}"
                 messages = [{"role": "system", "content": system}, {"role": "user", "content": task_text}]
-                messages.extend(history[-6:])
                 if image:
                     messages.append({"role": "user", "content": [{"type": "text", "text": content},
                         {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + image}}]})
@@ -153,12 +156,12 @@ class BrowserAgent:
                 reply = await asyncio.wait_for(call, timeout=max(1, min(360, until - time.monotonic()))) if until else await call
                 tool_result = ""
                 if not reply.tool_calls:
-                    history.append({"role": "assistant", "content": reply.content or ""})
+                    history.append(f"{len(history) + 1}. answered without choosing a tool")
                     tool_result = "Choose a tool to continue or call done."
                     continue
                 # Execute one browser action per observation. Multiple record calls are safe.
                 browser_used = False
-                action_notes = []
+                did, recorded = [], Counter()
                 for call in reply.tool_calls:
                     args = json.loads(call.function.arguments)
                     name = call.function.name
@@ -186,9 +189,12 @@ class BrowserAgent:
                     elif name == "fetch_signing_tan" and self.tan_fetcher and submit:
                         tool_result += await self.tan_fetcher(args)
                     elif name == "record":
-                        if self.ledger:
+                        if not isinstance(args.get("kind"), str) or not isinstance(args.get("data"), dict):
+                            tool_result += "A record call needs kind (a record type name) and data (its fields).\n"
+                        elif self.ledger:
                             result = self.ledger.add(args["kind"], args["data"], self.session, self.name, args.get("snippet", ""), args.get("frame_path", "frame/0"))
                             tool_result += str(result) + "\n"
+                            recorded[args["kind"] + (" refused" if not str(result).startswith("Recorded") else "")] += 1
                             if stop_record == args["kind"] and result == "Recorded " + stop_record:
                                 worker_status[self.name] = "done"
                                 self.summary = "Requested evidence recorded."
@@ -229,18 +235,19 @@ class BrowserAgent:
                         self.bus.emit("agent_step", self.name, {"step": self.step_count, "goal": task[:200],
                             "thought": args.get("reason", "")[:200], "action": logged_action,
                             "observation_size": len(snapshot.text), "page_url": self.session.page.url})
-                    action_notes.append(f"{name}: {json.dumps(args, ensure_ascii=False)}")
-                history.append({"role": "assistant", "content": "\n".join(action_notes)})
-                # A long reading is shown once in full; the running history keeps only its start.
+                        did.append(", ".join(f"{item['kind']} {target or item.get('url') or item.get('section') or ''}".strip()
+                                             for item, target in zip(batch, targets))[:220] + f" ({args.get('reason', '')[:90]})")
+                    if name in ("need_help", "wait_for_evidence", "fetch_signing_tan"):
+                        did.append(name)
+                if recorded:
+                    did.append("recorded " + ", ".join(f"{count} {kind}" for kind, count in recorded.items()))
+                outcome = " ".join(tool_result.split())
+                history.append(f"{len(history) + 1}. " + "; ".join(did) + " -> " + (outcome[:200] if browser_used else outcome[:90]))
                 # A long reading stays in front of the model while it only records from it, and leaves with the
-                # next browser action; the running history keeps just its start.
-                kept = tool_result
-                if len(tool_result) > 2500:
-                    if browser_used:
-                        reading = tool_result + "\n[this reading stays visible until your next browser action]\n"
-                        tool_result = ""
-                    kept = kept[:1500] + "\n[long reading; kept in view while you record from it]"
-                history.append({"role": "user", "content": "Results: " + kept})
+                # next browser action.
+                if len(tool_result) > 2500 and browser_used:
+                    reading = tool_result + "\n[this reading stays visible until your next browser action]\n"
+                    tool_result = ""
                 self.step_count += 1
             except asyncio.CancelledError:
                 worker_status[self.name] = "paused at phase deadline"
@@ -257,5 +264,6 @@ class BrowserAgent:
             except Exception as error:
                 tool_result = self.scrub(f"Tool/observation error: {type(error).__name__}: {str(error)[:1500]}. Adapt using a fresh observation.")
                 self.bus.emit("retry", self.name, {"step": step, "reason": tool_result})
+                history.append(f"{len(history) + 1}. step failed: " + " ".join(tool_result.split())[:140])
         worker_status[self.name] = "step limit"
         return {"summary": self.summary, "gaps": ["Step limit reached"]}
