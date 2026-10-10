@@ -13,12 +13,13 @@ window for targeted followups, so a stuck worker cannot consume that phase.
 - `rfq.config.Settings.from_env(env=None) -> Settings`: dataclass with
   `api_url: str | None`, `run_token: str | None`, `scouting: dict | None`,
   `cdp_urls: list[str]`, `headless: bool`, `data_dir: Path`,
-  `submit_margin_s: int = 600`, `max_steps: int = 70`,
-  `run_budget_s: int = 2100`, `qwen_model: str = "qwen3.8-flash-next"`,
-  `frontier_enabled: bool = False`, `frontier_model: str | None = None`.
-  Reject frontier enablement for now. Refuse data_dir inside the checkout.
-  These are enlarged development correctness-test budgets, clamped to platform
-  expiry. They are not a claim of meeting the later performance gate.
+  `submit_margin_s: int = 420`, `max_steps: int = 70`,
+  `run_budget_s: int = 1140`, and the model settings: `model_name`,
+  `model_base_url_env`, `model_api_key_env`, `model_extra_body`, `model_prices`,
+  `model_stream`, the first-response, chunk-gap and total time limits, and
+  `model_retries`. One client serves whichever OpenAI-compatible model these
+  select. Refuse data_dir inside the checkout. The budget is the same for test
+  and scored runs and stays inside the 20-minute scored limit.
 - `rfq.platform.load_run(settings) -> dict`: synchronous authenticated run
   fetch with retries or scouting dict. Preserve unknown platform fields.
   `seconds_left(run, now=None) -> float` handles epoch milliseconds.

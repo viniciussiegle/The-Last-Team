@@ -22,8 +22,9 @@ flowchart LR
 
 Only `my-agent/` ships. It extends the supplied starter and uses Python 3.12,
 uv, Playwright CDP, Pydantic and Qwen. The root contains development scripts,
-synthetic tests and build documentation. Frontier access is disabled pending
-human approval. [PROGRESS.md](PROGRESS.md) records the latest completed gate;
+synthetic tests and build documentation. The model is chosen by configuration
+through one client interface; the default is the hosted Qwen model.
+[PROGRESS.md](PROGRESS.md) records the latest completed gate;
 [ARCHITECTURE.md](ARCHITECTURE.md) defines interfaces and evaluation limits.
 
 Install dependencies and Chromium from `my-agent/` using `uv sync --frozen`
@@ -64,9 +65,8 @@ checks does not guarantee performance on an unknown private website.
 `RULES_STAGE=core` is the initial end-to-end mode. `RULES_STAGE=full` enables
 the complete commercial adjustment pipeline, whose sandbox scoring gate is
 still pending. `RUN_BUDGET_S` and `SUBMIT_MARGIN_S` control the deadline.
-The current development defaults are 2100 seconds with 600 seconds reserved
-for signing, bounded by platform expiry. This enlarged correctness-testing
-budget does not satisfy the eventual ten-minute performance target.
+The defaults are 1140 seconds with 420 seconds reserved for submitting and
+signing, the same for test runs and scored runs, because a scored run ends
+after 20 minutes. The ten-minute performance target is not met yet.
 Sandbox tests are authorized up to four concurrent team runs. Every scored
-submission, frontier model choice and frontier enablement requires explicit
-human approval; see [AGENTS.md](AGENTS.md).
+submission requires explicit human approval; see [AGENTS.md](AGENTS.md).

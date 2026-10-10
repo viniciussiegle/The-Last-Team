@@ -27,15 +27,17 @@ Scripts must work on native Windows and Linux; use Python for packaging.
 - Never start a scored submission without explicit human approval. Sandbox test
   runs are authorized, with at most four concurrent team tests.
 - Run scripts/fairplay_check.py before every package. Only my-agent/ is tarred.
-- Frontier stays disabled and FRONTIER_MODEL unset pending human approval.
+- The agent runs on the hosted Qwen and Clef models only. The model is selected by configuration
+  (one client interface), so another provider behind the run proxy needs settings, not code.
+- When a record fails validation, the model is re-asked with the error and the relevant text, at most
+  twice; after that the field stays unknown and blank. Never guess a value.
 
 ## Checkpoints
 
-Stop and notify the human before any scored submission; choosing a frontier
-model; shipping frontier enabled; unresolved rule ambiguity after two A/B
-runs; any fair-play doubt; or half the development frontier budget spent.
+Stop and notify the human before any scored submission; unresolved rule
+ambiguity after two A/B runs; or any fair-play doubt.
 After each completed milestone write five lines to PROGRESS.md and commit on
-main. Reach the first eligible sandbox test before dashboard polish.
+the working branch named in CLAUDE.md; never push. Reach the first eligible sandbox test before dashboard polish.
 
 ## Generality acceptance
 
