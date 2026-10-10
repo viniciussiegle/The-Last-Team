@@ -18,6 +18,15 @@ TEMPORARY_FAILURE = re.compile(
 RETRY_CONTROL = re.compile(r"^\s*(erneut versuchen|nochmals? versuchen|wiederholen|retry|try again)\s*$", re.I)
 
 
+async def count(locator, limit: float = 2) -> int:
+    """How many elements match, or none when their frame does not answer: a frame whose document never arrives
+    would otherwise keep the caller waiting for good."""
+    try:
+        return await asyncio.wait_for(locator.count(), limit)
+    except Exception:
+        return 0
+
+
 def temporary_failure(text: str) -> bool:
     """A short page that only reports a transient failure, not a working page that mentions one."""
     return len(text) < 1500 and bool(TEMPORARY_FAILURE.search(text))
@@ -31,7 +40,7 @@ async def consent(session):
             if len(text) > 3500 or not re.search(r"cookie|cookies|datenschutz|consent", text, re.I):
                 continue
             button = frame.get_by_role("button", name=re.compile(r"(?:notwendige|necessary|essential).*cookies.*(?:akzeptieren|accept)|(?:alle akzeptieren|accept all|zustimmen)", re.I))
-            if await button.count() == 1 and await button.is_visible():
+            if await count(button) == 1 and await button.is_visible():
                 await button.click(timeout=3500)
                 session.notices.append("Generic cookie consent accepted.")
                 return
@@ -67,16 +76,16 @@ async def login(session) -> str:
     """Fill a model-selected login form using generic credential field types."""
     for frame in session.page.frames:
         passwords = frame.locator('input[type="password"]:visible')
-        if not await passwords.count():
+        if not await count(passwords):
             continue
         # An assigned worker may follow evidence to another run-provided site.
         site = getattr(session, "sites_by_origin", {}).get(_origin(frame.url),
                 getattr(session, "current_site", session.site))
         credentials = site.get("credentials") or {}
         form = passwords.first.locator("xpath=ancestor::form[1]")
-        scope = form if await form.count() else frame
+        scope = form if await count(form) else frame
         users = scope.locator('input:not([type="password"]):not([type="hidden"]):not([type="submit"]):not([type="checkbox"]):not([type="radio"]):not([readonly]):not([disabled]):visible')
-        if not await users.count():
+        if not await count(users):
             return "Login needs a username field selected explicitly."
         await users.first.fill(credentials.get("username", ""))
         await passwords.first.fill(credentials.get("password", ""))
@@ -90,7 +99,11 @@ async def abandon(session, bus=None, agent=""):
     """Replace a tab that stopped responding with a fresh one at the last working address."""
     stuck = session.page
     session.page = await session.new_tab()
-    target =session.last_good_urls.get(_origin(session.last_good_url), session.last_good_url) or session.site["url"]
+    # Back to where the work was; if that very page is what does not load, start again from the site's entry.
+    session.replaced_in_a_row += 1
+    target = session.last_good_urls.get(_origin(session.last_good_url), session.last_good_url) or session.site["url"]
+    if session.replaced_in_a_row > 1:
+        target = session.site["url"]
     try:
         await session.page.goto(target, wait_until="domcontentloaded", timeout=15000)
     except Exception:
@@ -139,7 +152,7 @@ async def recover(session, bus=None, agent=""):
                 # Prefer the page's own single retry control; reloading can repeat a failed form post.
                 again = session.page.get_by_role("link", name=RETRY_CONTROL).or_(
                     session.page.get_by_role("button", name=RETRY_CONTROL))
-                if await again.count() == 1:
+                if await count(again) == 1:
                     await again.click(timeout=3500)
                     await session.page.wait_for_load_state("domcontentloaded", timeout=5000)
                 else:
@@ -157,7 +170,7 @@ async def recover(session, bus=None, agent=""):
         previous = session.last_good_url
     if previous:
         for frame in session.page.frames:
-            if await frame.locator('input[type="password"]:visible').count():
+            if await count(frame.locator('input[type="password"]:visible')):
                 message = await login(session)
                 await consent(session)
                 if bus:

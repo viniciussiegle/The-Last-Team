@@ -72,7 +72,7 @@ class SpecRevision(StrictModel):
 
 class Material(StrictModel):
     number: str
-    status: Literal["active", "blocked", "other"]
+    status: Literal["active", "blocked", "other"] | None = None
     katalog_group: str
     bore: Decimal
     stroke: Decimal
@@ -165,6 +165,9 @@ baseline: decimal, multiplier: decimal}. Record the exact formula's parameters;
 do not silently infer an excess formula or floor unless text states it. Optional
 {floor: decimal} floors the per-kg rate difference. Material surcharge_rate is
 only for a directly stated fixed rate; otherwise record surcharge_index.
+Material status: give it only after reading the material's own status field and, where that is a code, the
+meaning the site states for the code; until then leave status out. A page header or a guess is not a status.
+Record every candidate of a group, not only the first: look-alikes differ in status or one attribute.
 Set known absent setup_fee/surcharge_mass to decimal zero only when evidenced.
 SearchCoverage: complete=true only after inspecting all candidates in the
 model-selected catalogue group, including paging if present. Needed to prove

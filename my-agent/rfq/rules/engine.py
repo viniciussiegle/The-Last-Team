@@ -84,9 +84,16 @@ def calculate(ledger, context, include_setup_in_surcharge=True, core_only=False)
                 missing(f"Position {pid}: revision-specific technical per-end reserve")
                 continue
             attributes["stroke"] = D(attributes["stroke"]) + 2 * D(reserve["per_end"])
-        matches = [m for m in materials if m.status == "active" and normalized(m.katalog_group) == normalized(requirement.katalog_group)
+        fitting = [m for m in materials if normalized(m.katalog_group) == normalized(requirement.katalog_group)
                    and all(D(getattr(m, name)) == D(attributes[name]) for name in ("bore", "stroke", "pressure"))
                    and all(normalized(getattr(m, name)) == normalized(attributes[name]) for name in ("mounting", "certification"))]
+        matches = [m for m in fitting if m.status == "active"]
+        unread = [m.number for m in fitting if m.status not in ("active", "blocked")]
+        if not matches and unread:
+            # A look-alike may be blocked: a candidate counts only once its status has been read.
+            missing(f"Position {pid}: read the status, and the stated meaning of its code, of candidate materials "
+                    f"{', '.join(unread)} and of every other candidate in group {requirement.katalog_group}")
+            continue
         if not matches:
             observed_materials = {m.number for m in materials if normalized(m.katalog_group) == normalized(requirement.katalog_group)}
             coverage = [c for c in ledger.of("SearchCoverage") if c.katalog_group == requirement.katalog_group and c.complete

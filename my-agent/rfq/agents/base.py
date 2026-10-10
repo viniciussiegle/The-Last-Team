@@ -116,9 +116,15 @@ class BrowserAgent:
                 worker_status[self.name] = "time limit"
                 return {"summary": self.summary, "gaps": ["Task time budget exhausted"]}
             try:
-                await recover(self.session, self.bus, self.name)
+                # Every step of the loop is time-bounded as a whole: one frame that never finishes loading must not
+                # leave the worker waiting inside some page call for the rest of the run.
+                try:
+                    await asyncio.wait_for(recover(self.session, self.bus, self.name), 25)
+                except asyncio.TimeoutError:
+                    raise PageUnresponsive("The page did not respond while it was being checked") from None
                 snapshot = await observe(self.session)
                 slow_reads = 0
+                self.session.replaced_in_a_row = 0
                 self.observations.append(snapshot.text)
                 self.observations = self.observations[-3:]
                 logged_snapshot = "[Signing mailbox observation omitted]" if self.ledger and self.ledger.allow_tan else snapshot.text
@@ -207,7 +213,10 @@ class BrowserAgent:
                         seen = self.session.elements
                         targets = [(seen.get(item["id"]) or {}).get("label", "")[:60] if isinstance(item.get("id"), int) else ""
                                    for item in batch]
-                        output = await act_many(self.session, batch)
+                        try:
+                            output = await asyncio.wait_for(act_many(self.session, batch), 150)
+                        except asyncio.TimeoutError:
+                            output = "The action did not finish within 150 seconds and was stopped. Look at the page again."
                         if isinstance(output, dict):
                             image = output["image"]
                             output = output["text"]

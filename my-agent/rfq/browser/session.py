@@ -30,6 +30,7 @@ class BrowserSession:
     last_good_urls: dict = field(default_factory=dict)
     opening_own_tab: bool = False
     seen_addresses: set[str] = field(default_factory=set)
+    replaced_in_a_row: int = 0
 
     @property
     def current_site(self):

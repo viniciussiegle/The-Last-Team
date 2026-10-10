@@ -8,10 +8,18 @@ from .guards import login
 from .session import origin
 
 
-def element(session, value):
+def element(session, value, wait_if_disabled=False):
     item = session.elements.get(int(value))
     if not item:
         raise ValueError("Unknown element id; use only the latest snapshot ids")
+    if item.get("disabled") and not wait_if_disabled:
+        # Said at once and with the likely way forward, instead of waiting for a control that will not enable itself.
+        nearby = [other.get("label", "")[:40] for other in session.elements.values()
+                  if other["frame"] is item["frame"] and not other.get("disabled")
+                  and (other.get("type") in ("submit", "button") or other.get("tag") == "button") and other.get("label")]
+        raise ValueError(f"'{item.get('label', '')[:60]}' is disabled. It becomes available only after what it depends on has been "
+                         "set and, on many forms, applied with a control of the same form"
+                         + (": " + " | ".join(nearby[:6]) if nearby else "") + ". Do that step, then return to this control.")
     return item, item["frame"].locator(f'[data-rfq-observe="{int(value)}"]')
 
 
@@ -304,7 +312,8 @@ async def act(session, action: dict) -> str | dict:
         if not isinstance(fields, list) or any(not isinstance(value, dict) or "id" not in value or "text" not in value for value in fields):
             raise ValueError("fill needs fields=[{id, text}, ...], or one observed id and text; use type for a single field")
         for value in fields:
-            item, locator = element(session, value["id"])
+            # An earlier field of the same form may be what enables this one.
+            item, locator = element(session, value["id"], wait_if_disabled=True)
             await set_value(item, locator, value["text"])
         if action.get("submit_id") is not None:
             _, locator = element(session, action["submit_id"])

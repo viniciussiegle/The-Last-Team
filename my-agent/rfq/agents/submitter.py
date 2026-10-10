@@ -48,13 +48,6 @@ async def submit_frozen(agent, mailbox_agent, answer, context, until):
             + "\nGerman net total: " + german(answer["total_net"])
             + "\nRuntime context: " + json.dumps(context, default=str, ensure_ascii=False))
     agent.bus.emit("submit_step", "submitter", {"status": "starting"})
-    # An expiring session discards the unsaved form, so the one flow that must not be interrupted starts on a
-    # new session instead of the one opened when gathering began.
-    try:
-        await agent.session.context.clear_cookies()
-        await agent.session.page.goto(agent.session.site["url"], wait_until="domcontentloaded", timeout=15000)
-    except Exception:
-        pass
     result = await agent.run(task, max_steps=75, until=until, submit=True)
     agent.bus.emit("submit_step", "submitter", result)
     return result
