@@ -1,112 +1,125 @@
-# Atira starter kit
+# The Last Team — RFQ agent
 
-A minimal starting point, not an agent. It does the platform plumbing: it reads the run, attaches to the run's
-browsers and shows how to call the free hosted models. Then it stops at `solve()` in `agent.py`, the place for your
-agent. Out of the box it exits without an answer.
+An autonomous agent for the [Atira RFQ challenge](https://ehl-challenge.atira.ai/llms.txt).
+The hosted Qwen model chooses which websites, records and documents to inspect,
+interprets the evidence, calculates a bid, and completes the portal's TAN signing flow.
 
-| File | What it does |
+## Architecture
+
+| File | Responsibility |
 | --- | --- |
-| `run.py` | The run contract: reads the run (`load_run`) and submits an API answer (`submit_answer`) |
-| `browsers.py` | Attaches to the run's browsers over CDP and gets a page (`connect`); locally it starts a Chromium |
-| `models.py` | One call to each hosted model: `ask_qwen` (Qwen3.8-Flash-Next) and `ask_clef` (Cloudflare Clef) |
-| `agent.py` | The entry point: reads the run, connects browser 1, calls `solve(task, page)` and submits what it returns |
-| `agent.json` | How the sandbox installs (`uv sync`, the versions in `uv.lock`) and runs it; it waits for the hosted `qwen` |
-| `tests/` | The plumbing against fakes |
+| `agent.py` | Load the task, attach to the supplied browser, and create a tab for each site |
+| `rfq_agent.py` | Model/tool loop, deadline awareness, evidence memory and submission confirmation |
+| `browser_tools.py` | Page observations, browser actions, document extraction and Decimal arithmetic |
+| `browsers.py` | Attach over CDP in the sandbox; launch Chromium only for local development |
+| `models.py` | Hosted model clients using the platform's proxy |
+| `run.py` | Starter kit run contract and API submission plumbing |
+| `dev.py` | Load scouting exports as data and start a local run |
+| `agent.json` | Reproducible setup and sandbox entry point |
 
-## Your agent goes in `solve()`
+The browser tools expose visible controls, frames, expandable documents and screenshots.
+The model selects each navigation, search and document. PDF, ZIP, DOCX and text extraction
+is restricted to an observed document URL. Exact arithmetic uses Decimal with explicit
+half-up rounding. Previous observations and model-selected notes remain available through
+the `recall` and `remember` tools. Browser errors return a fresh observation for recovery.
 
-`solve(task, page)` gets the run and a Playwright page in browser 1:
+The agent has a 19-minute working budget, bounded by the actual run deadline. It prompts
+the model to finish a signed partial bid when time is short. A saved draft is insufficient:
+the agent must see confirmation on the tender portal before reporting completion.
 
-- `task["brief"]`: the task and its rules;
-- `task["access"]`: each website's `siteId`, `url` and `credentials`;
-- `task["submission"]`: where the answer goes, `{"kind": "api", "url": ...}` or `{"kind": "site", "url": ...}`;
-- `task["answer_schema"]`: the JSON Schema of the answer.
+## Generalization to new websites
 
-For an `api` submission, return the answer and `main()` submits it: `202` is accepted and final, `400` lists the
-issues to fix. For a `site` submission, enter the answer on that website yourself and return `None`. Reading pages,
-acting on them and working out the answer are yours to build.
+The package contains no public-scenario answers, tender references, material numbers,
+prices, discounts, credentials, or website routes. The run contract supplies site names,
+URLs, credentials, submission destination, business rules, and answer schema. The model
+discovers controls and document links from the current pages and chooses each action.
+Unusual login flows can use model-selected credential inputs. No fixed sequence of clicks
+or scenario-specific lookup table drives the investigation.
 
-Mind the clock: a scored run has 20 minutes, and `run.seconds_left(task)` says how many seconds are left. Every part
-of the answer scores on its own, so submit your best answer about a minute before the end rather than keep
-searching; an answer that comes too late scores 0.
+The reusable strategy is RFQ reasoning: establish current requirements, match materials,
+verify commercial evidence, calculate, and sign according to the supplied brief. The
+challenge documentation says the final keeps that business task while changing websites
+and data. This agent does not assume that arbitrary new business tasks share those rules.
 
-More browsers: set `"browsers": 2` (up to 4) in `agent.json`, then `await browsers.connect(playwright, 1)` attaches
-to browser 2.
+Each run starts with empty evidence, document, and observation memory. Local traces and
+scouting records are excluded from packaging. Synthetic tests change hosts, site IDs,
+routes, form layouts and credentials, including a login with multiple steps. A separate
+optional model test asks the actual agent to complete two small RFQs on generated websites
+with fresh material numbers, quantities, prices, lead times, TANs and shuffled form fields.
+These checks do not establish accuracy on tomorrow's full challenge. Public scores measure
+today's dataset only.
 
-## The hosted models in short
+## Setup
 
-Both are free and need no key of yours: runs get the variables, and locally `atira scout --env` sets them, pointed
-at `atira models proxy`.
+Requirements: Python 3.12+, uv, and the authenticated Atira CLI.
 
-```python
-import models
-
-text = await models.ask_qwen("Which button submits this form? ...")          # QWEN_BASE_URL, QWEN_API_KEY
-yes = await models.ask_clef({"page": page_text}, "Is this the current revision?")  # CLEF_BASE_URL, CLEF_API_KEY
+```sh
+uv sync
+uv run playwright install chromium
+atira status
 ```
 
-`models.qwen()` is an OpenAI SDK client, for tool calls, images and everything else. Clef is set only where the
-platform hosts it; if your agent relies on it, list `"models": ["qwen", "clef"]` in `agent.json` so the run waits for
-it to warm up. Another provider works with your own key through the run's metering proxy:
-`$API/docs/run-contract.md#llm-calls`.
+The sandbox installs the locked dependencies with `uv sync` and supplies Chromium over
+CDP. It supplies the task, credentials and hosted model access at runtime.
 
-## Run it locally
+## Local development
 
-You need [uv](https://docs.astral.sh/uv/getting-started/installation/) (open a new terminal after installing it, so
-it is on your PATH) and the Atira CLI, signed in once with `atira login`.
-
-Terminal 1: start the free models and leave it open.
+Start the model proxy in one terminal:
 
 ```sh
 atira models proxy
 ```
 
-Terminal 2, in this folder:
+In another terminal, from this directory:
 
 ```sh
-uv sync && uv run playwright install chromium
-eval "$(atira scout --env)"     # the scouting logins, and the model variables pointed at that proxy
-uv run --no-sync python agent.py
+uv run --no-sync python dev.py
 ```
 
-In PowerShell on Windows, Terminal 2:
+`dev.py` parses `atira scout --challenge rfq --env` without evaluating shell code.
+It defaults to headless browsing; set `HEADLESS=0` to see the browser.
+Scouting submissions do not count toward the challenge.
 
-```powershell
-uv sync; uv run playwright install chromium
-atira scout --env | Out-String | Invoke-Expression    # the same exports
-uv run --no-sync python agent.py
-```
+Runtime traces are saved under `.runs/`; `AGENT_TRACE` overrides the path. Traces can
+contain task evidence and must remain excluded from the uploaded package. `.gitignore`
+also excludes credentials, the virtual environment, Git and Entire metadata.
 
-A Chromium window opens (`HEADLESS=1` hides it). Nothing done with the scouting logins counts, and locally an answer
-is printed, never submitted. If `atira` says `Unknown command: models`, run `atira upgrade`.
+On machines with a restricted home directory, uv and Playwright support custom cache
+paths through `UV_CACHE_DIR` and `PLAYWRIGHT_BROWSERS_PATH`. Use the same browser path
+for installation and execution.
 
-## Test-run it, then submit it
+## Test and submit
 
 ```sh
-atira test-run .   # the sandbox, exactly like a scored run, on the public dataset; opens the run page live
-atira submit .     # reviewed, then run once and scored for the leaderboard
+uv run --no-sync python -m unittest discover -s tests
+RUN_BROWSER_TESTS=1 uv run --no-sync python -m unittest discover -s tests
+atira test-run . --challenge rfq --dry-run
+atira test-run . --challenge rfq --no-open --follow
+atira submit . --challenge rfq --no-open --follow
 ```
 
-Both pack this directory without what `.gitignore` excludes.
+The second test command also exercises Chromium with synthetic pages; it requires the
+local Playwright browser installation. The dry run lists the exact package contents. The sandbox test provides the actual
+score and browser recording. A scored submission first undergoes the platform's review.
 
-## Environment
-
-| Variable | Set by | Used for |
-| --- | --- | --- |
-| `CHALLENGE_API_URL`, `CHALLENGE_RUN_TOKEN` | runs | the run, at `/v1/runs/current` |
-| `CHALLENGE_SCOUTING` | `atira scout --env` | locally: the brief and the scouting logins |
-| `CDP_URL`, `CDP_URLS` | runs | the sandbox's browsers; locally the kit starts its own Chromium |
-| `QWEN_BASE_URL`, `QWEN_API_KEY` | runs, `atira scout --env` | the hosted Qwen |
-| `CLEF_BASE_URL`, `CLEF_API_KEY` | runs, `atira scout --env`, when Clef is hosted | the hosted Clef |
-
-## Docs
-
-- How a run works: `$API/docs/run-contract.md`
-- Building an agent: `$API/docs/building-an-agent.md`
-- Fair play, the rules: `$API/docs/fair-play.md`
-
-## Tests
+To run the generated RFQs, start the model proxy and set `QWEN_BASE_URL` and
+`QWEN_API_KEY` from `atira scout --env`, then run:
 
 ```sh
-uv run python -m unittest discover -s tests
+RUN_MODEL_TESTS=1 uv run --no-sync python -m unittest discover -s tests -p test_transfer.py
 ```
+
+This optional test calls the hosted model and allows three minutes per fixture.
+
+```sh
+atira status --challenge rfq
+atira logs RUN_ID --follow
+```
+
+## Challenge documentation
+
+- [RFQ task and rules](https://ehl-challenge.atira.ai/challenges/rfq.md)
+- [Building an agent](https://ehl-challenge.atira.ai/docs/building-an-agent.md)
+- [Run contract](https://ehl-challenge.atira.ai/docs/run-contract.md)
+- [Fair play](https://ehl-challenge.atira.ai/docs/fair-play.md)
+- [Submitting](https://ehl-challenge.atira.ai/docs/submitting.md)
