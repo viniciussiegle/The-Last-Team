@@ -142,8 +142,10 @@ class BrowserAgent:
                     self.session.last_good_url = self.session.page.url
                     from ..browser.session import origin
                     self.session.last_good_urls[origin(self.session.page.url)] = self.session.page.url
-                shared = json.dumps(self.shared, ensure_ascii=False, default=str)
-                known = self.ledger.summary(self.name) if self.ledger else ""
+                # The submitter works from the frozen answer alone: other workers' notes and the evidence would only
+                # invite it to go looking for missing facts instead of submitting.
+                shared = "(not shown while submitting)" if submit else json.dumps(self.shared, ensure_ascii=False, default=str)
+                known = "(not shown while submitting)" if submit else (self.ledger.summary(self.name) if self.ledger else "")
                 evidence_counts = Counter(kind for kind, _, _ in self.ledger.records) if self.ledger else {}
                 remaining_steps = (max_steps or self.settings.max_steps) - step
                 # The worker's own memory: one line per step it has taken, so it does not repeat or re-learn.
@@ -156,8 +158,7 @@ class BrowserAgent:
                     image = None
                 else:
                     messages.append({"role": "user", "content": content})
-                # Filling the form from the frozen answer copies known values; it does not need the reasoning pass.
-                call = self.model.complete(self.name, messages, TOOLS + ([TAN_TOOL] if self.tan_fetcher and submit else []), light=submit)
+                call = self.model.complete(self.name, messages, TOOLS + ([TAN_TOOL] if self.tan_fetcher and submit else []))
                 reply = await asyncio.wait_for(call, timeout=max(1, min(360, until - time.monotonic()))) if until else await call
                 tool_result = ""
                 if not reply.tool_calls:
