@@ -5,6 +5,8 @@ observations go to four model-driven browser workers and an append-only typed
 ledger. A deterministic resolver selects evidence; Decimal rules compute the
 answer. A model-driven submitter uses the target website and signing mailbox.
 The deadline freezes the best validated answer early enough to submit.
+The initial worker pass reserves up to three minutes of the investigation
+window for targeted followups, so a stuck worker cannot consume that phase.
 
 ## M0 contracts
 
@@ -47,6 +49,7 @@ The deadline freezes the best validated answer early enough to submit.
   origin and the run-provided site map, including cross-site investigations.
 - `observe(session, max_chars=26000) -> Snapshot` traverses every frame and
   binds numbered visible elements. Snapshot contains text, digest and elements.
+  Clear prior observation attributes, including hidden elements, before rebinding.
 - `act(session, action: dict) -> str` accepts generic actions using observed
   element IDs. Never accepts arbitrary JavaScript from the model.
 - `BrowserAgent.run(task, max_steps=None) -> dict` repeatedly observes, calls
@@ -57,6 +60,13 @@ The deadline freezes the best validated answer early enough to submit.
   after one new validated record of that kind is appended. Rejected or duplicate
   records do not satisfy it. Signing-code retrieval uses this completion rule
   to preserve the remaining submission time.
+  During signing, Ledger.tan_context carries the runtime tender reference,
+  earliest request time and optional observed request identifier. A TAN must
+  match the reference; available request/expiry metadata is checked against
+  that context and the current clock. Observed minute-only timestamps represent
+  one-minute intervals. Missing metadata is reported explicitly.
+  Closed selected popups recover to a surviving page in the same supplied
+  browser; new popup pages receive the normal action timeout.
 - Event types: run_started, phase, agent_step, relogin, retry, escalation,
   record_added, record_rejected, trace_step, answer_frozen, submit_step,
   run_finished. Step thought summaries are concise decision explanations.
@@ -68,7 +78,11 @@ Evidence and rule interfaces will be specified before their implementation.
 `Ledger(bus).add(kind, data, session, agent, snippet)` validates the named
 Pydantic record, attaches browser provenance and appends it. Validation errors
 are returned to the model. `of(kind)` returns records; `summary()` serializes
-current facts, with no disk store inside the checkout. Record kinds and exact
+current facts, with no disk store inside the checkout. `summary(role=None,
+max_chars=16000)` prioritizes the requesting worker's dependencies, merges
+paged specifications, drops repeated mail prose and reports omitted record
+counts. It returns valid JSON without discarding a raw string prefix. The
+underlying ledger remains append-only and complete. Record kinds and exact
 fields are defined in `rfq/evidence/models.py`; decimal strings are preferred.
 
 `resolve(ledger, context) -> Resolved` selects exact-reference authorized mail

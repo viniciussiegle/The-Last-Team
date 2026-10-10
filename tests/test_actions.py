@@ -120,6 +120,47 @@ class ObservedActions(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ValueError, "Unknown element id"):
             await act(self.session, {"kind": "click", "id": stale_id})
 
+    async def test_hiding_observed_control_removes_its_id_before_renumbering(self):
+        await self.page.set_content(
+            '<button id="synthetic-first">First</button>'
+            '<button id="synthetic-second">Second</button>'
+            '<script>document.querySelector("#synthetic-second").addEventListener('
+            '"click", () => document.body.dataset.clicked = "yes")</script>'
+        )
+        await observe(self.session)
+        first = self.page.locator("#synthetic-first")
+        second = self.page.locator("#synthetic-second")
+        self.assertIsNotNone(await first.get_attribute("data-rfq-observe"))
+        self.assertIsNotNone(await second.get_attribute("data-rfq-observe"))
+
+        await first.evaluate("element => element.style.display = 'none'")
+        snapshot = await observe(self.session)
+
+        self.assertIsNone(await first.get_attribute("data-rfq-observe"))
+        visible_id = await second.get_attribute("data-rfq-observe")
+        self.assertIsNotNone(visible_id)
+        self.assertEqual(len(snapshot.elements), len(set(snapshot.elements)))
+        await act(self.session, {"kind": "click", "id": int(visible_id)})
+        self.assertEqual(await self.page.locator("body").get_attribute("data-clicked"), "yes")
+
+    async def test_recover_restores_surviving_page_after_selected_popup_closes(self):
+        await self.page.set_content(
+            '<button onclick="window.open(\'about:blank\')">Open synthetic popup</button>'
+            '<p>Synthetic original page</p>'
+        )
+        async with self.page.expect_popup() as pending_popup:
+            await self.page.get_by_role("button", name="Open synthetic popup").click()
+        popup = await pending_popup.value
+        self.session.install_handlers(popup)
+        await popup.set_content("<p>Synthetic popup content</p>")
+        self.session.page = popup
+        await popup.close()
+
+        await recover(self.session)
+
+        self.assertIs(self.session.page, self.page)
+        self.assertTrue(any("Selected tab closed" in notice for notice in self.session.notices))
+
     async def test_cross_site_login_uses_current_origin_and_does_not_restore_other_site(self):
         form = '<form onsubmit="event.preventDefault()"><input name="user"><input type="password"></form>'
         await self.page.route("**/*", lambda route: route.fulfill(body=form, content_type="text/html"))

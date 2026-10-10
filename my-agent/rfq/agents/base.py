@@ -40,7 +40,11 @@ TOOLS = [
     }, ["question"]),
 ]
 
-TAN_TOOL = function("fetch_signing_tan", "After requesting a TAN on the portal, ask the mailbox worker for the fresh signing code. Never request another portal TAN while using this one.", {}, [])
+TAN_TOOL = function("fetch_signing_tan", "After requesting a TAN on the portal, ask the mailbox worker for the current signing code. Include the portal's request metadata when displayed. Never invent request identifiers or request another TAN while using this one.", {
+    "request_id": {"type": "string"},
+    "requested_at": {"type": "string", "description": "Observed portal request timestamp with timezone, only if shown."},
+    "requested_at_precision": {"type": "string", "enum": ["second", "minute"], "description": "Use minute only when the displayed time omits seconds."}
+}, [])
 
 
 class BrowserAgent:
@@ -96,9 +100,9 @@ class BrowserAgent:
                     from ..browser.session import origin
                     self.session.last_good_urls[origin(self.session.page.url)] = self.session.page.url
                 shared = json.dumps(self.shared, ensure_ascii=False, default=str)
-                known = self.ledger.summary() if self.ledger else ""
+                known = self.ledger.summary(self.name) if self.ledger else ""
                 remaining_steps = (max_steps or self.settings.max_steps) - step
-                content = f"Steps remaining: {remaining_steps}. Finish with done before exhausting them; state gaps explicitly.\nShared worker updates: {shared[-10000:]}\nEvidence ledger: {known[-16000:]}\nPrevious tool result: {tool_result[-14000:]}\nCURRENT OBSERVATION:\n{snapshot.text}"
+                content = f"Steps remaining: {remaining_steps}. Finish with done before exhausting them; state gaps explicitly.\nShared worker updates: {shared[-10000:]}\nEvidence ledger: {known}\nPrevious tool result: {tool_result[-14000:]}\nCURRENT OBSERVATION:\n{snapshot.text}"
                 messages = [{"role": "system", "content": system}, {"role": "user", "content": task_text}]
                 messages.extend(history[-6:])
                 if image:
@@ -132,7 +136,7 @@ class BrowserAgent:
                         self.bus.emit("dependency", self.name, args)
                         tool_result += "Dependency shared. Continue independent investigation or done with explicit gaps.\n"
                     elif name == "fetch_signing_tan" and self.tan_fetcher and submit:
-                        tool_result += await self.tan_fetcher()
+                        tool_result += await self.tan_fetcher(args)
                     elif name == "record":
                         if self.ledger:
                             result = self.ledger.add(args["kind"], args["data"], self.session, self.name, args.get("snippet", ""), args.get("frame_path", "frame/0"))

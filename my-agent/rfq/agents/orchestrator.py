@@ -85,8 +85,9 @@ async def orchestrate(run, settings, bus):
             if settings.rules_stage == "core":
                 worker_tasks["mail"] = "Identify the logged-in bidder mailbox domain and record TenderInfo. First find ALL candidate discount approvals for the exact tender reference in inbox and archive, with sender/date/reference/threshold. Then find revision-specific technical reserve approvals needed for usable stroke and FX fixing keys needed by ERP conditions. Record typed MailRecord payloads and preserve raw text. Prioritize these core inputs; other commercial adjustment topics are for a later phase. Search exact reference plus topic from observed evidence, never broad crawling. Do not request TAN yet."
                 worker_tasks["erp"] += " Core phase priority: matching active materials, valid condition/scales, and stock/lead time. Record these promptly before investigating optional adjustments."
-            tasks = [asyncio.create_task(agent.run(worker_tasks.get(role, TASKS["tender"]), until=freeze_at)) for role, agent in agents.items()]
-            done, pending = await asyncio.wait(tasks, timeout=max(0, freeze_at - time.monotonic()))
+            initial_deadline = freeze_at - min(180, max(0, freeze_at - time.monotonic()) * 0.25)
+            tasks = [asyncio.create_task(agent.run(worker_tasks.get(role, TASKS["tender"]), until=initial_deadline)) for role, agent in agents.items()]
+            done, pending = await asyncio.wait(tasks, timeout=max(0, initial_deadline - time.monotonic()))
             for task in pending:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)

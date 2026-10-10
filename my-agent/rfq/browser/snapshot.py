@@ -17,6 +17,8 @@ SNAPSHOT_JS = r"""({start, expanded}) => {
   const tidy = s => (s||'').replace(/[\u200B-\u200D\uFEFF]/g,'').replace(/\s+/g,' ').trim();
   let next=start;
   const elements=[];
+  // Hidden controls retain attributes across redraws; clear the previous observation first.
+  document.querySelectorAll('[data-rfq-observe]').forEach(e=>e.removeAttribute('data-rfq-observe'));
   const selector='a,button,input,select,textarea,summary,[role=button],[role=link],[role=tab],[role=menuitem],[role=option],[role=checkbox],[role=radio],[onclick],[tabindex]';
   for (const e of document.querySelectorAll(selector)) {
     if(!visible(e)||e.getAttribute('type')==='hidden') continue;

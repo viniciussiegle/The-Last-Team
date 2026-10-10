@@ -113,6 +113,20 @@ def answer_lines(calculation):
 
 
 class PricingAndSelection(unittest.TestCase):
+    def test_later_partial_material_record_does_not_erase_known_stock_or_lead_times(self):
+        known = material(stock_qty="8", lead_weeks_stock=2, lead_weeks_production=6)
+        partial = material(stock_qty=None, lead_weeks_stock=None, lead_weeks_production=None)
+        result = calculate(ledger(positions=[position(quantity="5")], materials=[known, partial]),
+                           context(), core_only=True)
+
+        self.assertTrue(result.complete, result.gaps)
+        line = result.answer["positions"][0]
+        self.assertEqual(line["quantity"], 5)
+        self.assertEqual(line["material_number"], "MAT-1")
+        self.assertEqual(line["lead_time_weeks"], 2)
+        self.assertEqual(line["base_unit_price"], Decimal("10.00"))
+        self.assertEqual(result.answer["total_net"], Decimal("50.00"))
+
     def test_partial_candidate_inspection_does_not_prove_no_bid(self):
         partial = ledger(materials=[material(status="blocked")], coverage=[
             SearchCoverage(katalog_group="Group-A", complete=True,

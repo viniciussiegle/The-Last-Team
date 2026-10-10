@@ -34,6 +34,7 @@ class BrowserSession:
         return self.sites_by_origin.get(origin(self.page.url), self.site)
 
     def install_handlers(self, page):
+        page.set_default_timeout(7000)
         async def dialog_handler(dialog):
             self.dialogs.append(dialog.message)
             if self.confirm_final:

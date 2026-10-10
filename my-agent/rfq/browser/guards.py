@@ -50,6 +50,16 @@ async def login(session) -> str:
 
 
 async def recover(session, bus=None, agent=""):
+    if session.page.is_closed():
+        remaining = [page for page in session.context.pages if not page.is_closed()]
+        if remaining:
+            session.page = remaining[0]
+            await session.page.bring_to_front()
+        else:
+            session.page = await session.context.new_page()
+            session.install_handlers(session.page)
+            await session.page.goto(session.last_good_url or session.site["url"], wait_until="domcontentloaded")
+        session.notices.append("Selected tab closed; restored a remaining working tab.")
     await consent(session)
     # These are generic browser failure patterns, never site paths.
     text = ""

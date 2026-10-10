@@ -42,7 +42,13 @@ def calculate(ledger, context, include_setup_in_surcharge=True, core_only=False)
     if not resolved.spec:
         return calc
     requirements = {r.requirement_id: r for r in resolved.spec.requirements}
-    materials = list({m.number: m for m in ledger.of("Material")}.values())
+    material_records = {}
+    for material in ledger.of("Material"):
+        prior = material_records.get(material.number)
+        # Optional unknowns on another tab do not retract previously observed facts.
+        updates = {key: value for key, value in material.model_dump().items() if value is not None}
+        material_records[material.number] = prior.model_copy(update=updates) if prior else material
+    materials = list(material_records.values())
     lines = {}
     for position in resolved.positions:
         pid = position.position_id

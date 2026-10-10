@@ -125,7 +125,10 @@ class SearchCoverage(StrictModel):
 
 class TAN(StrictModel):
     value: str
+    reference: str | None = None
+    request_id: str | None = None
     requested_at: datetime | None = None
+    requested_at_precision: Literal["second", "minute"] = "second"
     expires_at: datetime | None = None
 
 
