@@ -74,6 +74,14 @@ returns `answer`, `trace`, `gaps`, and `complete`. Unknown is never zero.
 scenario_date, bidder_domain (when known), authorized_senders by mail kind,
 and site-role assignments. No scenario-derived context ships as a constant.
 
+Initial M2 configuration uses `RULES_STAGE=core`: evidence-based material,
+quantity, converted base price, approval and shared-stock delivery; its quoted
+unit price applies the approved discount to base and keeps totals consistent.
+Commercial adjustment breakdowns are absent. `RULES_STAGE=full` enables the
+complete adjustment pipeline for later milestone verification. Both paths
+retain missing-input diagnostics; neither invents optional breakdown values.
+`SURCHARGE_INCLUDES_SETUP=true` is the initial interpretation to test later.
+
 Browser documents: `async open_document(session, element_id) -> str` downloads
 only a model-selected observed link/control. Resolve relative href against its
 frame URL; restrict to session.allowed_origins. Use context.request.get for

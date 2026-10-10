@@ -14,7 +14,7 @@ SECRET = re.compile(r"(?i)(?:\b(?:sk|key|token|pass|secret)[-_][A-Za-z0-9_-]{12,
 TAN = re.compile(r"(?i)\b(?:tan|one[- ]time code|verification code)\s*[:=]?\s*\d{4,8}\b")
 URL = re.compile(r"(?i)https?://[^\s\"'<>]+")
 HOST_LITERAL = re.compile(r"[\"'`]((?:[a-z0-9-]+\.)+[a-z]{2,})(?::\d+)?[\"'`]")
-HOST_ASSIGNMENT = re.compile(r"(?i)\b(?:hostname|website|site\s+host|domain)\s*[:=]\s*([a-z0-9-]+(?:\.[a-z0-9-]+)+)")
+HOST_ASSIGNMENT = re.compile(r"(?i)\b(?:hostname|website|site\s+host|domain)\s*[:=]\s*[\"']([a-z0-9-]+(?:\.[a-z0-9-]+)+)[\"']")
 GENERIC_HOSTS = {"example.com", "example.org", "example.net", "localhost", "pypi.org", "files.pythonhosted.org"}
 FILE_SUFFIXES = {"py", "pyc", "pyo", "json", "jsonl", "toml", "md", "txt", "yaml", "yml", "ini", "cfg", "html", "css", "js", "ts", "tsx", "png", "jpg", "jpeg", "pdf", "zip", "gz", "lock"}
 USERNAME = re.compile(r"(?i)\b(?:scouting[_ -]?username|username)\s*[:=]\s*['\"]?([A-Za-z0-9_.@+-]{3,})")

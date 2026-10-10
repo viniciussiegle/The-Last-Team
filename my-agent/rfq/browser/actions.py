@@ -1,0 +1,91 @@
+from __future__ import annotations
+
+import base64
+from urllib.parse import urljoin
+
+from .guards import login
+from .session import origin
+
+
+def element(session, value):
+    item = session.elements.get(int(value))
+    if not item:
+        raise ValueError("Unknown element id; use only the latest snapshot ids")
+    return item, item["frame"].locator(f'[data-rfq-observe="{int(value)}"]')
+
+
+async def act(session, action: dict) -> str | dict:
+    kind = action["kind"]
+    page = session.page
+    if kind == "login":
+        return await login(session)
+    if kind == "goto":
+        url = urljoin(page.url, action["url"])
+        if origin(url) not in session.allowed_origins:
+            raise ValueError("Navigation must stay on this run's websites")
+        await page.goto(url, wait_until="domcontentloaded")
+    elif kind == "click":
+        item, locator = element(session, action["id"])
+        if item.get("href"):
+            href = urljoin(page.url, item["href"])
+            if href.startswith(("http:", "https:")) and origin(href) not in session.allowed_origins:
+                raise ValueError("Link leaves the allowed websites")
+        session.confirm_final = bool(action.get("confirm_final"))
+        try:
+            await locator.click()
+        finally:
+            session.confirm_final = False
+    elif kind in ("type", "select", "check"):
+        _, locator = element(session, action["id"])
+        if kind == "type":
+            item, _ = element(session, action["id"])
+            if item.get("type") == "range":
+                await locator.evaluate("(e,v)=>{e.value=v;e.dispatchEvent(new Event('input',{bubbles:true}));e.dispatchEvent(new Event('change',{bubbles:true}));}", str(action.get("text", "")))
+            else:
+                await locator.fill(str(action.get("text", "")))
+            if action.get("submit"):
+                await locator.press("Enter")
+        elif kind == "select":
+            try:
+                await locator.select_option(label=str(action["option"]))
+            except Exception:
+                await locator.select_option(value=str(action["option"]))
+        else:
+            await locator.set_checked(bool(action.get("checked", True)))
+    elif kind == "fill":
+        for value in action["fields"]:
+            _, locator = element(session, value["id"])
+            await locator.fill(str(value["text"]))
+        if action.get("submit_id") is not None:
+            _, locator = element(session, action["submit_id"])
+            await locator.click()
+    elif kind == "press":
+        if action.get("id") is not None:
+            _, locator = element(session, action["id"])
+            await locator.press(action["key"])
+        else:
+            await page.keyboard.press(action["key"])
+    elif kind == "scroll":
+        await page.mouse.wheel(0, -600 if action.get("direction") == "up" else 600)
+    elif kind == "back":
+        await page.go_back(wait_until="domcontentloaded")
+    elif kind == "switch_tab":
+        session.page = session.context.pages[int(action["index"])]
+        await session.page.bring_to_front()
+    elif kind == "look":
+        data = await page.screenshot(type="jpeg", quality=65)
+        return {"image": base64.b64encode(data).decode()}
+    elif kind == "extract_table":
+        if action.get("id"):
+            _, locator = element(session, action["id"])
+            return await locator.inner_text()
+        return "\n\n".join(await page.locator("table").all_inner_texts()) or "No tables; read the current snapshot."
+    elif kind == "expand":
+        from .snapshot import observe
+        return (await observe(session, expanded=action["section"])).text
+    elif kind == "open_document":
+        from .documents import open_document
+        return await open_document(session, action["id"])
+    else:
+        raise ValueError(f"Unsupported browser action: {kind}")
+    return "Action completed. Verify the new observation."

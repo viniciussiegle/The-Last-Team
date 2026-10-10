@@ -7,6 +7,7 @@ import asyncio
 import json
 import re
 import sys
+import time
 from typing import Any
 
 from .config import Settings
@@ -27,25 +28,25 @@ def _redact(value: Any, key: str = "") -> Any:
 
 
 def main(argv: list[str] | None = None) -> int:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
     parser = argparse.ArgumentParser(prog="python -m rfq")
     parser.add_argument("--dry", action="store_true", help="read and summarize the current run")
     parser.add_argument("--orient", action="store_true", help="run the model-guided site orientation pass")
     args = parser.parse_args(argv)
-    if not args.dry and not args.orient:
-        print("RFQ orchestrator is not wired yet; use --dry to inspect the current run.", file=sys.stderr)
-        return 2
     try:
         settings = Settings.from_env()
         run = load_run(settings)
     except (ValueError, RuntimeError) as exc:
         print(f"Cannot load run: {exc}", file=sys.stderr)
         return 1
-    if args.orient:
-        from .agents.orchestrator import orient
+    if not args.dry:
+        from .agents.orchestrator import orient, orchestrate
         from .telemetry.events import EventBus
 
-        bus = EventBus(settings.data_dir, str(run.get("run_id") or "local"))
-        asyncio.run(orient(run, settings, bus))
+        bus = EventBus(settings.data_dir, str(run.get("run_id") or f"local-{int(time.time())}"))
+        asyncio.run((orient if args.orient else orchestrate)(run, settings, bus))
         return 0
 
     summary = {

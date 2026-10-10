@@ -68,7 +68,7 @@ def _scout_env() -> dict[str, str]:
     if not cli:
         raise RuntimeError("Atira CLI was not found; set ATIRA_CLI or provide CHALLENGE_SCOUTING")
     command = [cli, "scout", "--challenge", "rfq", "--env"]
-    result = subprocess.run(command, cwd=ROOT, capture_output=True, text=True, check=False)
+    result = subprocess.run(command, cwd=ROOT, capture_output=True, text=True, encoding="utf-8", check=False, timeout=60)
     if result.returncode:
         raise RuntimeError(f"Atira scout command failed (exit {result.returncode})")
     parsed = _parse_assignments(result.stdout)

@@ -37,6 +37,8 @@ class Settings:
     qwen_model: str = "qwen3.8-flash-next"
     frontier_enabled: bool = False
     frontier_model: str | None = None
+    surcharge_includes_setup: bool = True
+    rules_stage: str = "core"
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "Settings":
@@ -81,4 +83,6 @@ class Settings:
             qwen_model=source.get("QWEN_MODEL", "qwen3.8-flash-next"),
             frontier_enabled=False,
             frontier_model=None,
+            surcharge_includes_setup=str(source.get("SURCHARGE_INCLUDES_SETUP", "true")).lower() in {"1", "true", "yes"},
+            rules_stage=source.get("RULES_STAGE", "core"),
         )

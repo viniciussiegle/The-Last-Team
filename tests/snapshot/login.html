@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="de">
+<head><meta charset="utf-8"><title>Synthetic login panel</title></head>
+<body>
+  <input aria-label="Saved address" name="saved-address" type="text" value="synthetic saved address" readonly>
+  <div role="dialog" style="display:none">Hidden stale notice should not be observed.</div>
+  <form>
+    <label>Username <input name="username" type="text"></label>
+    <label>Password <input name="password" type="password"></label>
+    <button type="submit">Sign in</button>
+  </form>
+  <table><tr><th>Requirement</th><th>Value</th></tr><tr><td>Stroke</td><td>75 mm</td></tr></table>
+  <script>document.querySelector('form').addEventListener('submit', event => event.preventDefault());</script>
+</body>
+</html>

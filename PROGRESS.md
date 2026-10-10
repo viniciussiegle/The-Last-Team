@@ -1,5 +1,5 @@
-Works: M0 dry run, safe external telemetry, package layout and frozen dependencies pass.
-Test quality: no test run yet.
-Cost: no agent inference yet.
-Time: M0 complete; local model-driven orientation starts next.
-Next: verify four-site orientation and reach the first eligible sandbox test.
+Works: M1 passed; all four workers log in and summarize their sites; 47 synthetic tests pass.
+Test quality: first sandbox test pending; core pricing and website submitter are wired.
+Cost: successful local orientation used approximately $0.01875 in simulated Qwen cost.
+Time: successful parallel orientation took approximately 160 seconds.
+Next: first sandbox test, diagnose eligibility and complete the M2 gate.

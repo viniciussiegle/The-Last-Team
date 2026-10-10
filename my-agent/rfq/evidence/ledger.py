@@ -1,0 +1,47 @@
+from __future__ import annotations
+
+import json
+from datetime import datetime, timezone
+
+from pydantic import ValidationError
+
+from .models import PAYLOAD_GUIDE, RECORD_TYPES, Provenance
+
+
+class Ledger:
+    def __init__(self, bus):
+        self.bus = bus
+        self.records = []
+        self.keys = set()
+
+    def schema_text(self):
+        return json.dumps({k: v.model_json_schema() for k, v in RECORD_TYPES.items()}, ensure_ascii=False) + "\n" + PAYLOAD_GUIDE
+
+    def add(self, kind, data, session, agent, snippet):
+        if kind not in RECORD_TYPES:
+            return "Unknown record kind. Expected one of: " + ", ".join(RECORD_TYPES)
+        try:
+            record = RECORD_TYPES[kind].model_validate(data)
+        except ValidationError as error:
+            self.bus.emit("record_rejected", agent, {"kind": kind, "reason": str(error)[:1500]})
+            return "Validation failed; correct fields from evidence: " + str(error)[:2500]
+        key = kind + record.model_dump_json()
+        if key in self.keys:
+            return "Record already present."
+        provenance = Provenance(site_id=session.site["siteId"], url=session.page.url,
+            title=session.last_snapshot.text.splitlines()[1][:200] if session.last_snapshot else "",
+            snippet=snippet[:300], observed_at=datetime.now(timezone.utc), agent=agent)
+        self.records.append((kind, record, provenance))
+        self.keys.add(key)
+        payload = record.model_dump(mode="json")
+        if kind == "TAN":
+            payload = {"value": "[ephemeral]"}
+        self.bus.emit("record_added", agent, {"kind": kind, "record": payload, "provenance": provenance.model_dump(mode="json")})
+        return "Recorded " + kind
+
+    def of(self, kind):
+        return [record for name, record, _ in self.records if name == kind]
+
+    def summary(self):
+        # Structured facts, rather than repeated page history, are shared across agents.
+        return json.dumps([{"kind": kind, **record.model_dump(mode="json")} for kind, record, _ in self.records if kind != "TAN"], ensure_ascii=False)

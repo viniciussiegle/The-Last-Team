@@ -11,7 +11,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+PACKAGE_DIR = Path(__file__).resolve().parents[1] / "my-agent"
+sys.path.insert(0, str(PACKAGE_DIR))
 
 import agent  # noqa: E402
 import browsers  # noqa: E402
@@ -168,6 +169,13 @@ class TheEntryPoint(Case):
     """main() with a fake browser: no answer exits cleanly, an answer is submitted."""
 
     async def start(self, environment, answer=None):
+        class FakePlaywright:
+            async def __aenter__(self):
+                return object()
+
+            async def __aexit__(self, *_):
+                return False
+
         async def connect(playwright, number=0):
             return "browser", "page"
 
@@ -176,7 +184,8 @@ class TheEntryPoint(Case):
             return answer
 
         out = io.StringIO()
-        with patch.dict(os.environ, environment, clear=True), patch.object(browsers, "connect", connect), \
+        with patch.dict(os.environ, environment, clear=True), patch.object(agent, "async_playwright", FakePlaywright), \
+                patch.object(browsers, "connect", connect), \
                 patch.object(agent, "solve", solve), redirect_stdout(out):
             code = await agent.main()
         return code, out.getvalue()
