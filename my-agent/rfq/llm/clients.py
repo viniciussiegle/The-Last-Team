@@ -5,6 +5,7 @@ import os
 import time
 
 from openai import AsyncOpenAI
+from openai.types.chat import ChatCompletionMessage
 
 
 class ModelClient:
@@ -12,6 +13,10 @@ class ModelClient:
 
     The endpoint, key, model name, extra request parameters and prices all come from settings, so another
     OpenAI-compatible provider behind the run proxy needs configuration only.
+
+    A request is occasionally left without any response while the service answers others normally. Answers are
+    therefore read as a stream: a healthy call starts within a couple of seconds, so one that has sent nothing
+    after a short limit is abandoned and sent again instead of being waited on.
     """
 
     def __init__(self, settings, bus):
@@ -36,11 +41,9 @@ class ModelClient:
         attempt = 0
         while True:
             attempt += 1
-            # A hosted model may need minutes to wake for its first answer; afterwards a silent call is a stuck one.
-            limit = self.settings.model_call_timeout_s if self.answered else self.settings.model_first_call_timeout_s
             try:
                 async with self.semaphore:
-                    response = await asyncio.wait_for(self.client.chat.completions.create(**kwargs), limit)
+                    message, usage, finish = await (self.streamed(kwargs) if self.settings.model_stream else self.whole(kwargs))
             except asyncio.CancelledError:
                 raise
             except Exception as error:
@@ -49,10 +52,10 @@ class ModelClient:
                                                      "reason": f"{type(error).__name__}: {str(error)[:200]}"})
                 if attempt >= attempts:
                     raise
-                await asyncio.sleep(min(2 ** attempt, 6))
+                await asyncio.sleep(min(attempt, 4))
                 continue
             self.answered = True
-            finish = self.account(agent, response, started)
+            self.account(agent, usage, finish, started)
             # Reasoning counts against the output allowance, so a cut-off answer can be empty or half a tool call.
             if finish == "length" and attempt < attempts:
                 kwargs["max_tokens"] = min(kwargs["max_tokens"] * 2, 12000)
@@ -60,23 +63,75 @@ class ModelClient:
                                                      "reason": "answer cut off at the output allowance",
                                                      "next_max_tokens": kwargs["max_tokens"]})
                 continue
-            return response.choices[0].message
+            return message
 
-    def account(self, agent, response, started):
-        """Price one answered call, cut off or not, and return why it ended."""
-        usage = response.usage
-        counts = usage.model_dump() if usage else {}
+    def wake_allowance(self, usual):
+        """A hosted model may need minutes to wake for its first answer; afterwards a silent call is a stuck one."""
+        return usual if self.answered else self.settings.model_first_call_timeout_s
+
+    async def whole(self, kwargs):
+        response = await asyncio.wait_for(self.client.chat.completions.create(**kwargs),
+                                          self.wake_allowance(self.settings.model_call_timeout_s))
+        choice = response.choices[0]
+        return choice.message, response.usage.model_dump() if response.usage else {}, choice.finish_reason
+
+    async def streamed(self, kwargs):
+        began = time.monotonic()
+        end = began + self.wake_allowance(self.settings.model_call_timeout_s)
+        first_by = began + self.wake_allowance(self.settings.model_first_chunk_timeout_s)
+
+        def remaining(until):
+            left = min(until, end) - time.monotonic()
+            if left <= 0:
+                raise asyncio.TimeoutError
+            return left
+
+        stream = await asyncio.wait_for(self.client.chat.completions.create(
+            **kwargs, stream=True, stream_options={"include_usage": True}), remaining(first_by))
+        content, calls, usage, finish, started = [], {}, {}, None, False
+        try:
+            chunks = stream.__aiter__()
+            while True:
+                until = time.monotonic() + self.settings.model_chunk_gap_timeout_s if started else first_by
+                try:
+                    chunk = await asyncio.wait_for(chunks.__anext__(), remaining(until))
+                except StopAsyncIteration:
+                    break
+                started = True
+                if chunk.usage:
+                    usage = chunk.usage.model_dump()
+                for choice in chunk.choices:
+                    finish = choice.finish_reason or finish
+                    if choice.delta.content:
+                        content.append(choice.delta.content)
+                    for part in choice.delta.tool_calls or []:
+                        call = calls.setdefault(part.index, {"id": "", "name": "", "arguments": ""})
+                        call["id"] = part.id or call["id"]
+                        if part.function:
+                            call["name"] += part.function.name or ""
+                            call["arguments"] += part.function.arguments or ""
+        finally:
+            await stream.close()
+        if finish is None:
+            raise RuntimeError("model stream ended without a finish reason")
+        message = ChatCompletionMessage.model_validate({
+            "role": "assistant", "content": "".join(content) or None,
+            "tool_calls": [{"id": call["id"] or f"call_{index}", "type": "function",
+                            "function": {"name": call["name"], "arguments": call["arguments"]}}
+                           for index, call in sorted(calls.items())] or None})
+        return message, usage, finish
+
+    def account(self, agent, counts, finish, started):
+        """Price one answered call, cut off or not."""
         cached = (counts.get("prompt_tokens_details") or {}).get("cached_tokens", 0) or 0
         reasoning = (counts.get("completion_tokens_details") or {}).get("reasoning_tokens", 0) or 0
-        inputs, outputs = counts.get("prompt_tokens", 0), counts.get("completion_tokens", 0)
+        inputs, outputs = counts.get("prompt_tokens", 0) or 0, counts.get("completion_tokens", 0) or 0
         prices = self.settings.model_prices
         cost = ((inputs - cached) * prices["input"] + cached * prices["cached"] + outputs * prices["output"]) / 1e6
         self.total_cost += cost
-        finish = response.choices[0].finish_reason
         self.bus.emit("model_call", agent, {"model": self.model, "tokens_in": inputs, "tokens_cached": cached,
                                              "tokens_out": outputs, "tokens_reasoning": reasoning, "cost": cost,
                                              "finish": finish, "latency": round(time.monotonic() - started, 3)})
-        return finish
 
 
 QwenClient = ModelClient  # name used by development scripts

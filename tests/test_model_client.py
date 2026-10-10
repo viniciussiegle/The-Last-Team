@@ -15,10 +15,29 @@ sys.path.insert(0, str(PACKAGE))
 
 from rfq.llm.clients import ModelClient  # noqa: E402
 
-REPLY = {"id": "synthetic", "object": "chat.completion", "created": 0, "model": "synthetic-model", "choices": [
-    {"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": "synthetic answer"}}],
-    "usage": {"prompt_tokens": 1000, "completion_tokens": 100, "total_tokens": 1100,
-              "prompt_tokens_details": {"cached_tokens": 400}}}
+USAGE = {"prompt_tokens": 1000, "completion_tokens": 100, "total_tokens": 1100,
+         "prompt_tokens_details": {"cached_tokens": 400}}
+COST = (600 * 1.0 + 400 * 0.1 + 100 * 2.0) / 1e6  # at the synthetic prices configured below
+
+
+def chunk(delta=None, finish=None, usage=None):
+    body = {"id": "synthetic", "object": "chat.completion.chunk", "created": 0, "model": "synthetic-model",
+            "choices": [] if delta is None and finish is None else [{"index": 0, "delta": delta or {}, "finish_reason": finish}]}
+    if usage:
+        body["usage"] = usage
+    return body
+
+
+ANSWER = [chunk({"role": "assistant", "content": "synthetic "}), chunk({"content": "answer"}), chunk({}, "stop"), chunk(usage=USAGE)]
+CUT_OFF = [chunk({"role": "assistant", "content": None}), chunk({}, "length"), chunk(usage=USAGE)]
+TOOL_CALL = [
+    chunk({"role": "assistant", "tool_calls": [{"index": 0, "id": "call_synthetic", "type": "function",
+                                                "function": {"name": "browser", "arguments": ""}}]}),
+    chunk({"tool_calls": [{"index": 0, "function": {"arguments": '{"actions": [{"kind": "cli'}}]}),
+    chunk({"tool_calls": [{"index": 0, "function": {"arguments": 'ck", "id": 7}], "reason": "synthetic"}'}}]}),
+    chunk({"tool_calls": [{"index": 1, "id": "call_second", "type": "function",
+                           "function": {"name": "record", "arguments": '{"kind": "Synthetic"}'}}]}),
+    chunk({}, "tool_calls"), chunk(usage=USAGE)]
 
 
 class Bus:
@@ -28,31 +47,50 @@ class Bus:
     def emit(self, kind, agent, data):
         self.events.append((kind, agent, data))
 
+    def of(self, kind):
+        return [data for name, _, data in self.events if name == kind]
 
-class StalledThenAnswering(unittest.IsolatedAsyncioTestCase):
-    """A model endpoint that leaves its first requests unanswered, then answers normally."""
 
-    async def serve(self, silent_requests, cut_off_requests=0):
-        self.requests = 0
+class ModelEndpoint(unittest.IsolatedAsyncioTestCase):
+    """A stand-in model endpoint whose successive requests behave as scripted."""
+
+    async def serve(self, *script):
+        """Each script entry handles one request: 'silent', 'half' (starts, then stops sending) or a chunk list."""
+        self.script = list(script)
+        self.requests = []
         self.held = []
-        self.allowances = []
 
         async def handle(reader, writer):
             headers = await reader.readuntil(b"\r\n\r\n")
             length = int(next((line.split(b":")[1] for line in headers.split(b"\r\n")
                                if line.lower().startswith(b"content-length")), b"0"))
-            self.allowances.append(json.loads(await reader.readexactly(length)).get("max_tokens"))
-            self.requests += 1
-            if self.requests <= silent_requests:
-                self.held.append(writer)  # keep the connection open and say nothing
+            request = json.loads(await reader.readexactly(length))
+            self.requests.append(request)
+            plan = self.script[min(len(self.requests), len(self.script)) - 1]
+            if plan == "silent":
+                self.held.append(writer)  # connection accepted, nothing ever sent
                 return
-            reply = REPLY
-            if self.requests <= silent_requests + cut_off_requests:
-                reply = {**REPLY, "choices": [{"index": 0, "finish_reason": "length",
-                                               "message": {"role": "assistant", "content": None}}]}
-            body = json.dumps(reply).encode()
-            writer.write(b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: "
-                         + str(len(body)).encode() + b"\r\nconnection: close\r\n\r\n" + body)
+            chunks = ANSWER if plan == "half" else plan
+            if not request.get("stream"):
+                text = "".join(c["choices"][0]["delta"].get("content") or "" for c in chunks if c["choices"])
+                finish = next(c["choices"][0]["finish_reason"] for c in chunks if c["choices"] and c["choices"][0]["finish_reason"])
+                body = json.dumps({"id": "synthetic", "object": "chat.completion", "created": 0, "model": "synthetic-model",
+                                   "choices": [{"index": 0, "finish_reason": finish,
+                                                "message": {"role": "assistant", "content": text or None}}],
+                                   "usage": USAGE}).encode()
+                writer.write(b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: "
+                             + str(len(body)).encode() + b"\r\nconnection: close\r\n\r\n" + body)
+                await writer.drain()
+                writer.close()
+                return
+            writer.write(b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n")
+            for position, part in enumerate(chunks):
+                writer.write(b"data: " + json.dumps(part).encode() + b"\n\n")
+                await writer.drain()
+                if plan == "half" and position == 0:
+                    self.held.append(writer)  # the answer began and then went quiet
+                    return
+            writer.write(b"data: [DONE]\n\n")
             await writer.drain()
             writer.close()
 
@@ -70,88 +108,133 @@ class StalledThenAnswering(unittest.IsolatedAsyncioTestCase):
         settings = SimpleNamespace(model_name="synthetic-model", model_base_url_env="SYNTHETIC_URL",
                                    model_api_key_env="SYNTHETIC_KEY", model_extra_body={},
                                    model_prices={"input": 1.0, "cached": 0.1, "output": 2.0}, model_concurrency=4,
-                                   model_call_timeout_s=1, model_first_call_timeout_s=1, model_retries=2)
+                                   model_stream=True, model_first_chunk_timeout_s=1, model_chunk_gap_timeout_s=1,
+                                   model_call_timeout_s=6, model_first_call_timeout_s=1, model_retries=2)
         for name, value in overrides.items():
             setattr(settings, name, value)
         self.bus = Bus()
         with patch.dict(os.environ, {"SYNTHETIC_URL": url, "SYNTHETIC_KEY": "synthetic-key"}):
             return ModelClient(settings, self.bus)
 
-    async def test_a_silent_call_is_abandoned_and_sent_again(self):
-        model = self.client(await self.serve(silent_requests=1))
-        started = time.monotonic()
+    async def ask(self, model, **kwargs):
+        return await model.complete("worker", [{"role": "user", "content": "synthetic question"}], **kwargs)
 
-        reply = await model.complete("worker", [{"role": "user", "content": "synthetic question"}])
+    async def test_a_streamed_answer_is_assembled_and_priced(self):
+        model = self.client(await self.serve(ANSWER))
+
+        reply = await self.ask(model)
 
         self.assertEqual(reply.content, "synthetic answer")
-        self.assertEqual(self.requests, 2)
-        self.assertLess(time.monotonic() - started, 8)
-        retries = [data for kind, _, data in self.bus.events if kind == "model_retry"]
-        self.assertEqual([(r["attempt"], r["of"]) for r in retries], [(1, 3)])
-        [call] = [data for kind, _, data in self.bus.events if kind == "model_call"]
-        # 600 fresh input, 400 cached, 100 output at the configured prices per million tokens
-        self.assertAlmostEqual(call["cost"], (600 * 1.0 + 400 * 0.1 + 100 * 2.0) / 1e6)
-        self.assertAlmostEqual(model.total_cost, call["cost"])
+        self.assertIsNone(reply.tool_calls)
+        self.assertTrue(self.requests[0]["stream"])
+        [call] = self.bus.of("model_call")
+        self.assertEqual((call["finish"], call["tokens_in"], call["tokens_cached"], call["tokens_out"]), ("stop", 1000, 400, 100))
+        self.assertAlmostEqual(call["cost"], COST)
+        self.assertAlmostEqual(model.total_cost, COST)
+
+    async def test_tool_calls_split_across_chunks_are_put_back_together(self):
+        model = self.client(await self.serve(TOOL_CALL))
+
+        reply = await self.ask(model, tools=[{"type": "function", "function": {"name": "browser", "parameters": {"type": "object"}}}])
+
+        self.assertEqual([call.function.name for call in reply.tool_calls], ["browser", "record"])
+        self.assertEqual(json.loads(reply.tool_calls[0].function.arguments),
+                         {"actions": [{"kind": "click", "id": 7}], "reason": "synthetic"})
+        self.assertEqual(json.loads(reply.tool_calls[1].function.arguments), {"kind": "Synthetic"})
+        self.assertEqual(reply.tool_calls[0].id, "call_synthetic")
+        self.assertEqual(self.requests[0]["tool_choice"], "required")
+
+    async def test_a_call_that_sends_nothing_is_abandoned_quickly_and_sent_again(self):
+        model = self.client(await self.serve("silent", ANSWER))
+        started = time.monotonic()
+
+        reply = await self.ask(model)
+
+        self.assertEqual(reply.content, "synthetic answer")
+        self.assertEqual(len(self.requests), 2)
+        self.assertLess(time.monotonic() - started, 4)
+        self.assertEqual([(r["attempt"], r["of"]) for r in self.bus.of("model_retry")], [(1, 3)])
+        self.assertAlmostEqual(model.total_cost, COST)
+
+    async def test_an_answer_that_starts_and_then_goes_quiet_is_sent_again(self):
+        model = self.client(await self.serve("half", ANSWER))
+        started = time.monotonic()
+
+        reply = await self.ask(model)
+
+        self.assertEqual(reply.content, "synthetic answer")  # not the fragment "synthetic " from the abandoned attempt
+        self.assertEqual(len(self.requests), 2)
+        self.assertLess(time.monotonic() - started, 5)
+        self.assertEqual(len(self.bus.of("model_retry")), 1)
 
     async def test_an_endpoint_that_never_answers_fails_within_the_bound(self):
-        model = self.client(await self.serve(silent_requests=99), model_retries=1)
+        model = self.client(await self.serve("silent"), model_retries=1)
         started = time.monotonic()
 
         with self.assertRaises(Exception):
-            await model.complete("worker", [{"role": "user", "content": "synthetic question"}])
+            await self.ask(model)
 
-        self.assertEqual(self.requests, 2)
-        self.assertLess(time.monotonic() - started, 8)
-        self.assertEqual(len([1 for kind, _, _ in self.bus.events if kind == "model_retry"]), 2)
+        self.assertEqual(len(self.requests), 2)
+        self.assertLess(time.monotonic() - started, 6)
+        self.assertEqual(len(self.bus.of("model_retry")), 2)
         self.assertEqual(model.total_cost, 0.0)
 
     async def test_a_cut_off_answer_is_asked_again_with_a_larger_allowance_and_both_are_priced(self):
-        model = self.client(await self.serve(silent_requests=0, cut_off_requests=1))
+        model = self.client(await self.serve(CUT_OFF, ANSWER))
 
-        reply = await model.complete("worker", [{"role": "user", "content": "synthetic question"}], max_tokens=800)
+        reply = await self.ask(model, max_tokens=800)
 
         self.assertEqual(reply.content, "synthetic answer")
-        self.assertEqual(self.allowances, [800, 1600])
-        calls = [data for kind, _, data in self.bus.events if kind == "model_call"]
-        self.assertEqual([call["finish"] for call in calls], ["length", "stop"])
-        self.assertAlmostEqual(model.total_cost, sum(call["cost"] for call in calls))
-        self.assertGreater(calls[0]["cost"], 0)
+        self.assertEqual([request["max_tokens"] for request in self.requests], [800, 1600])
+        self.assertEqual([call["finish"] for call in self.bus.of("model_call")], ["length", "stop"])
+        self.assertAlmostEqual(model.total_cost, 2 * COST)
 
     async def test_an_answer_still_cut_off_after_the_last_attempt_is_returned_as_it_is(self):
-        model = self.client(await self.serve(silent_requests=0, cut_off_requests=99), model_retries=1)
+        model = self.client(await self.serve(CUT_OFF), model_retries=1)
 
-        reply = await model.complete("worker", [{"role": "user", "content": "synthetic question"}], max_tokens=800)
+        reply = await self.ask(model, max_tokens=800)
 
         self.assertIsNone(reply.content)
-        self.assertEqual(self.allowances, [800, 1600])
+        self.assertEqual([request["max_tokens"] for request in self.requests], [800, 1600])
 
     async def test_only_the_first_answer_gets_the_long_wake_up_allowance(self):
-        model = self.client(await self.serve(silent_requests=0), model_first_call_timeout_s=30, model_call_timeout_s=1)
-        await model.complete("worker", [{"role": "user", "content": "synthetic question"}])
+        model = self.client(await self.serve(ANSWER, "silent", ANSWER), model_first_call_timeout_s=30)
+        await self.ask(model)
         self.assertTrue(model.answered)
-        self.requests = -1  # the next request is left unanswered once
 
         started = time.monotonic()
-        await model.complete("worker", [{"role": "user", "content": "synthetic question"}])
+        await self.ask(model)
 
-        self.assertLess(time.monotonic() - started, 8)
+        self.assertEqual(len(self.requests), 3)
+        self.assertLess(time.monotonic() - started, 4)
+
+    async def test_before_the_first_answer_a_slow_start_is_waited_for(self):
+        model = self.client(await self.serve("silent", ANSWER), model_first_call_timeout_s=3)
+        started = time.monotonic()
+
+        await self.ask(model)
+
+        # The 1 s first-chunk limit does not apply yet: the silent first request is given the 3 s wake allowance.
+        self.assertGreater(time.monotonic() - started, 2.9)
+        self.assertEqual(len(self.requests), 2)
 
     async def test_configured_extra_parameters_reach_the_endpoint(self):
-        seen = {}
-        original = ModelClient.complete
+        model = self.client(await self.serve(ANSWER), model_extra_body={"synthetic_switch": {"mode": "plain"}})
 
-        model = self.client(await self.serve(silent_requests=0), model_extra_body={"synthetic_switch": {"mode": "plain"}})
-        create = model.client.chat.completions.create
+        await self.ask(model)
 
-        async def recording(**kwargs):
-            seen.update(kwargs)
-            return await create(**kwargs)
-        model.client.chat.completions.create = recording
+        self.assertEqual(self.requests[0]["synthetic_switch"], {"mode": "plain"})
+        self.assertEqual(self.requests[0]["model"], "synthetic-model")
 
-        await original(model, "worker", [{"role": "user", "content": "synthetic question"}])
+    async def test_a_provider_without_streaming_is_served_by_the_whole_answer_path(self):
+        model = self.client(await self.serve("silent", ANSWER), model_stream=False, model_call_timeout_s=1)
 
-        self.assertEqual(seen["extra_body"], {"synthetic_switch": {"mode": "plain"}})
-        self.assertEqual(seen["model"], "synthetic-model")
+        reply = await self.ask(model)
+
+        self.assertEqual(reply.content, "synthetic answer")
+        self.assertNotIn("stream", self.requests[1])
+        self.assertEqual(len(self.bus.of("model_retry")), 1)
+        self.assertAlmostEqual(model.total_cost, COST)
 
 
 if __name__ == "__main__":

@@ -56,7 +56,10 @@ class Settings:
     model_extra_body: dict = field(default_factory=dict)
     model_prices: dict = field(default_factory=lambda: dict(QWEN_PRICES))
     model_concurrency: int = 8
-    model_call_timeout_s: int = 90
+    model_stream: bool = True
+    model_first_chunk_timeout_s: int = 12
+    model_chunk_gap_timeout_s: int = 20
+    model_call_timeout_s: int = 180
     model_first_call_timeout_s: int = 360
     model_retries: int = 2
     surcharge_includes_setup: bool = True
@@ -108,7 +111,10 @@ class Settings:
             model_extra_body=extra_body,
             model_prices=prices,
             model_concurrency=int(source.get("MODEL_CONCURRENCY", "8")),
-            model_call_timeout_s=int(source.get("MODEL_CALL_TIMEOUT_S", "90")),
+            model_stream=str(source.get("MODEL_STREAM", "true")).strip().lower() in {"1", "true", "yes", "on"},
+            model_first_chunk_timeout_s=int(source.get("MODEL_FIRST_CHUNK_TIMEOUT_S", "12")),
+            model_chunk_gap_timeout_s=int(source.get("MODEL_CHUNK_GAP_TIMEOUT_S", "20")),
+            model_call_timeout_s=int(source.get("MODEL_CALL_TIMEOUT_S", "180")),
             model_first_call_timeout_s=int(source.get("MODEL_FIRST_CALL_TIMEOUT_S", "360")),
             model_retries=int(source.get("MODEL_RETRIES", "2")),
             surcharge_includes_setup=str(source.get("SURCHARGE_INCLUDES_SETUP", "true")).lower() in {"1", "true", "yes"},
