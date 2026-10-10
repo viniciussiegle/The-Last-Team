@@ -13,10 +13,12 @@ window for targeted followups, so a stuck worker cannot consume that phase.
 - `rfq.config.Settings.from_env(env=None) -> Settings`: dataclass with
   `api_url: str | None`, `run_token: str | None`, `scouting: dict | None`,
   `cdp_urls: list[str]`, `headless: bool`, `data_dir: Path`,
-  `submit_margin_s: int = 300`, `max_steps: int = 70`,
-  `run_budget_s: int = 1100`, `qwen_model: str = "qwen3.8-flash-next"`,
+  `submit_margin_s: int = 600`, `max_steps: int = 70`,
+  `run_budget_s: int = 2100`, `qwen_model: str = "qwen3.8-flash-next"`,
   `frontier_enabled: bool = False`, `frontier_model: str | None = None`.
   Reject frontier enablement for now. Refuse data_dir inside the checkout.
+  These are enlarged development correctness-test budgets, clamped to platform
+  expiry. They are not a claim of meeting the later performance gate.
 - `rfq.platform.load_run(settings) -> dict`: synchronous authenticated run
   fetch with retries or scouting dict. Preserve unknown platform fields.
   `seconds_left(run, now=None) -> float` handles epoch milliseconds.
@@ -50,6 +52,7 @@ window for targeted followups, so a stuck worker cannot consume that phase.
 - `observe(session, max_chars=26000) -> Snapshot` traverses every frame and
   binds numbered visible elements. Snapshot contains text, digest and elements.
   Clear prior observation attributes, including hidden elements, before rebinding.
+  Preserve visible block boundaries and line breaks without splitting inline text.
 - `act(session, action: dict) -> str` accepts generic actions using observed
   element IDs. Never accepts arbitrary JavaScript from the model.
 - `BrowserAgent.run(task, max_steps=None) -> dict` repeatedly observes, calls

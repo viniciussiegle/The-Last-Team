@@ -24,6 +24,8 @@ class Ledger:
             return "TAN evidence is accepted only during an explicit signing-code request. Continue the assigned evidence task."
         if kind not in RECORD_TYPES:
             return "Unknown record kind. Expected one of: " + ", ".join(RECORD_TYPES)
+        if kind == "TAN" and isinstance(data, dict) and hasattr(self.bus, "add_secret"):
+            self.bus.add_secret(str(data.get("value", "")))
         try:
             record = RECORD_TYPES[kind].model_validate(data)
         except ValidationError as error:

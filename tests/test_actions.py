@@ -192,6 +192,32 @@ class ObservedActions(unittest.IsolatedAsyncioTestCase):
         self.assertIn("value=on CHECKED", second)
         self.assertIn("MODAL", close)
 
+    async def test_snapshot_preserves_text_boundaries_without_splitting_inline_text(self):
+        await self.page.set_content(
+            '<div>RFQ-SYNTH-842</div>'
+            '<div><h2>Next synthetic heading</h2>'
+            '<span>MAT-</span><span>OMEGA-613</span></div>'
+            '<dl><dt>LOT-SYNTH-274</dt><dd>Quantity detail</dd></dl>'
+            '<div>Before break<br>DOC-SYNTH-509</div>'
+            '<div style="display:none">HIDDEN-SYNTH-991</div>'
+        )
+
+        snapshot = await observe(self.session)
+        lines = snapshot.text.splitlines()
+
+        for expected in (
+            "RFQ-SYNTH-842",
+            "Next synthetic heading",
+            "MAT-OMEGA-613",
+            "LOT-SYNTH-274",
+            "Quantity detail",
+            "Before break",
+            "DOC-SYNTH-509",
+        ):
+            with self.subTest(expected=expected):
+                self.assertEqual(lines.count(expected), 1)
+        self.assertNotIn("HIDDEN-SYNTH-991", snapshot.text)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -64,6 +64,9 @@ checks does not guarantee performance on an unknown private website.
 `RULES_STAGE=core` is the initial end-to-end mode. `RULES_STAGE=full` enables
 the complete commercial adjustment pipeline, whose sandbox scoring gate is
 still pending. `RUN_BUDGET_S` and `SUBMIT_MARGIN_S` control the deadline.
+The current development defaults are 2100 seconds with 600 seconds reserved
+for signing, bounded by platform expiry. This enlarged correctness-testing
+budget does not satisfy the eventual ten-minute performance target.
 Sandbox tests are authorized up to four concurrent team runs. Every scored
 submission, frontier model choice and frontier enablement requires explicit
 human approval; see [AGENTS.md](AGENTS.md).

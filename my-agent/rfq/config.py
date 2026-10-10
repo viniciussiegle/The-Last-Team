@@ -31,9 +31,9 @@ class Settings:
     cdp_urls: list[str]
     headless: bool
     data_dir: Path
-    submit_margin_s: int = 300
+    submit_margin_s: int = 600
     max_steps: int = 70
-    run_budget_s: int = 1100
+    run_budget_s: int = 2100
     qwen_model: str = "qwen3.8-flash-next"
     frontier_enabled: bool = False
     frontier_model: str | None = None
@@ -77,9 +77,9 @@ class Settings:
             cdp_urls=urls,
             headless=str(source.get("HEADLESS", "0")).strip().lower() in {"1", "true", "yes", "on"},
             data_dir=data_dir,
-            submit_margin_s=int(source.get("SUBMIT_MARGIN_S", "300")),
+            submit_margin_s=int(source.get("SUBMIT_MARGIN_S", "600")),
             max_steps=int(source.get("MAX_STEPS", "70")),
-            run_budget_s=int(source.get("RUN_BUDGET_S", "1100")),
+            run_budget_s=int(source.get("RUN_BUDGET_S", "2100")),
             qwen_model=source.get("QWEN_MODEL", "qwen3.8-flash-next"),
             frontier_enabled=False,
             frontier_model=None,

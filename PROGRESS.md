@@ -1,5 +1,5 @@
-Works: M1 passed; 87 synthetic tests pass; previous frozen candidate passed 3/3 navigation/extraction holdouts.
-Test quality: first two sandboxes missed signing with no answer; M2 remains incomplete; two improved candidates are active.
-Cost: first two sandboxes approximately $0.255 and $0.304; latest completed holdout batch approximately $0.00875.
-Time: failed sandboxes reached approximately 18m20s; successful local orientation took approximately 160s.
-Next: evaluate reviewed recovery/context/signing fixes on fresh holdouts and sandbox; verify accepted signing, eligibility, all positions, quantities and total.
+Works: M1 passed; 92 synthetic tests pass; card text-boundary correction awaits fresh model evaluation.
+Test quality: f3e75a5 failed the holdout gate: 2/3 exact extraction, 3/3 navigation; M2 incomplete; first two sandboxes returned no answer.
+Cost: first two sandboxes approximately $0.255 and $0.304; failed holdout batch approximately $0.00824.
+Time: next development candidate allows 35 min with 10 min signing reserve; this is not the eventual under 10 min performance gate.
+Next: retire failed holdout seeds, evaluate corrected serializer on fresh variants, then verify sandbox signing, eligibility and all-position consistency.

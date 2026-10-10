@@ -41,7 +41,14 @@ SNAPSHOT_JS = r"""({start, expanded}) => {
   if(clone){
     const originalNodes=Array.from(document.body.querySelectorAll('*'));
     const clonedNodes=Array.from(clone.querySelectorAll('*'));
-    originalNodes.forEach((e,i)=>{const s=getComputedStyle(e);if(s.display==='none'||s.visibility==='hidden')clonedNodes[i].remove();});
+    originalNodes.forEach((e,i)=>{
+      const s=getComputedStyle(e),copy=clonedNodes[i];
+      if(s.display==='none'||s.visibility==='hidden'){copy.remove();return;}
+      if(['block','flex','grid','list-item','table-row','table-cell'].includes(s.display)){
+        copy.before(document.createTextNode('\n'));copy.after(document.createTextNode('\n'));
+      }
+    });
+    clone.querySelectorAll('br,hr').forEach(e=>e.replaceWith(document.createTextNode('\n')));
     clone.querySelectorAll('script,style,svg,noscript').forEach(e=>e.remove());
     clone.querySelectorAll('nav,header,footer').forEach(e=>{nav+=tidy(e.textContent)+'\n';e.remove();});
     clone.querySelectorAll('table').forEach(t=>{
