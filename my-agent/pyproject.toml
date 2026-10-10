@@ -1,0 +1,15 @@
+[project]
+name = "atira-rfq-agent"
+version = "0.1.0"
+description = "Model-driven RFQ challenge agent"
+requires-python = ">=3.12"
+dependencies = [
+    "openai==2.54.0",
+    "playwright==1.63.0",
+    "pydantic>=2,<3",
+    "jsonschema>=4,<5",
+    "pdfplumber>=0.11,<1",
+]
+
+[tool.uv]
+package = false

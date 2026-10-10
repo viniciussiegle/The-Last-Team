@@ -7,3 +7,7 @@ __pycache__/
 .idea/
 .codex/
 .entire/
+runs/
+.dev_spend.json
+.pytest_cache/
+dist/

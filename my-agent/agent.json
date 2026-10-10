@@ -1,0 +1,6 @@
+{
+  "setup": ["uv", "sync", "--frozen"],
+  "run": ["uv", "run", "--no-sync", "python", "-m", "rfq"],
+  "browsers": 4,
+  "models": ["qwen"]
+}
