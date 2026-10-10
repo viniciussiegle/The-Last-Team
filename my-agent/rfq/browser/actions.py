@@ -30,6 +30,14 @@ async def set_value(item, locator, value):
         await locator.fill(text)
 
 
+async def click_with_confirmation(session, locator, confirm_final=False):
+    session.confirm_final = bool(confirm_final)
+    try:
+        await locator.click()
+    finally:
+        session.confirm_final = False
+
+
 async def act(session, action: dict) -> str | dict:
     kind = action["kind"]
     page = session.page
@@ -46,11 +54,7 @@ async def act(session, action: dict) -> str | dict:
             href = urljoin(page.url, item["href"])
             if href.startswith(("http:", "https:")) and origin(href) not in session.allowed_origins:
                 raise ValueError("Link leaves the allowed websites")
-        session.confirm_final = bool(action.get("confirm_final"))
-        try:
-            await locator.click()
-        finally:
-            session.confirm_final = False
+        await click_with_confirmation(session, locator, action.get("confirm_final"))
     elif kind in ("type", "select", "check"):
         _, locator = element(session, action["id"])
         if kind == "type":
@@ -66,12 +70,17 @@ async def act(session, action: dict) -> str | dict:
         else:
             await locator.set_checked(bool(action.get("checked", True)))
     elif kind == "fill":
-        for value in action["fields"]:
+        fields = action.get("fields")
+        if fields is None and action.get("id") is not None and "text" in action:
+            fields = [{"id": action["id"], "text": action["text"]}]
+        if not isinstance(fields, list) or any(not isinstance(value, dict) or "id" not in value or "text" not in value for value in fields):
+            raise ValueError("fill needs fields=[{id, text}, ...], or one observed id and text; use type for a single field")
+        for value in fields:
             item, locator = element(session, value["id"])
             await set_value(item, locator, value["text"])
         if action.get("submit_id") is not None:
             _, locator = element(session, action["submit_id"])
-            await locator.click()
+            await click_with_confirmation(session, locator, action.get("confirm_final"))
     elif kind == "press":
         if action.get("id") is not None:
             _, locator = element(session, action["id"])

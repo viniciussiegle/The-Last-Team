@@ -85,6 +85,37 @@ class ObservedActions(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await self.page.locator('input[type="checkbox"]').is_checked())
         self.assertEqual(await self.page.locator('input[type="text"]').input_value(), "synthetic note")
 
+    async def test_fill_accepts_one_observed_id_and_text(self):
+        await self.page.set_content('<input type="text" aria-label="synthetic single field">')
+        field_id = await self.observed_id("input")
+
+        await act(self.session, {"kind": "fill", "id": field_id, "text": "synthetic value"})
+
+        self.assertEqual(await self.page.locator("input").input_value(), "synthetic value")
+
+    async def test_fill_submit_confirmation_is_scoped_and_resets_authority(self):
+        await self.page.set_content(
+            '<input type="text" aria-label="synthetic form value">'
+            '<button type="button" aria-label="synthetic final action" '
+            'onclick="if(confirm(\'Synthetic final confirmation\')) document.body.dataset.submitted=\'yes\'">'
+            'Finish</button>'
+        )
+        field_id = await self.observed_id("input")
+        submit_id = await self.observed_id("button")
+
+        await act(self.session, {"kind": "fill", "fields": [{"id": field_id, "text": "synthetic value"}],
+                                 "submit_id": submit_id})
+        self.assertEqual(self.session.dialogs, ["Synthetic final confirmation"])
+        self.assertIsNone(await self.page.locator("body").get_attribute("data-submitted"))
+        self.assertFalse(self.session.confirm_final)
+
+        await act(self.session, {"kind": "fill", "fields": [{"id": field_id, "text": "synthetic value"}],
+                                 "submit_id": submit_id, "confirm_final": True})
+        self.assertEqual(self.session.dialogs,
+                         ["Synthetic final confirmation", "Synthetic final confirmation"])
+        self.assertEqual(await self.page.locator("body").get_attribute("data-submitted"), "yes")
+        self.assertFalse(self.session.confirm_final)
+
     async def test_confirm_is_dismissed_unless_final_authority_is_set(self):
         await self.page.set_content(
             '<button aria-label="synthetic confirm" '
@@ -217,6 +248,53 @@ class ObservedActions(unittest.IsolatedAsyncioTestCase):
             with self.subTest(expected=expected):
                 self.assertEqual(lines.count(expected), 1)
         self.assertNotIn("HIDDEN-SYNTH-991", snapshot.text)
+
+    async def test_snapshot_excludes_hidden_iframes_but_keeps_visible_nested_frame(self):
+        await self.page.set_content('<iframe id="hidden-frame" style="display:none"></iframe>'
+                                    '<iframe id="visible-parent"></iframe>')
+        await self.page.locator("#hidden-frame").evaluate(
+            "element => element.srcdoc = '<p>HIDDEN-ROOT-SYNTH-114</p>'")
+        await self.page.locator("#visible-parent").evaluate(
+            "element => element.srcdoc = '<p>VISIBLE-PARENT-SYNTH-226</p>' + "
+            "'<iframe id=\"nested-hidden\" style=\"display:none\"></iframe>' + "
+            "'<iframe id=\"nested-visible\"></iframe>'")
+        parent = None
+        for frame in self.page.frames:
+            if frame.parent_frame is self.page.main_frame and \
+                    "VISIBLE-PARENT-SYNTH-226" in await frame.locator("body").inner_text():
+                parent = frame
+                break
+        self.assertIsNotNone(parent)
+        await parent.locator("#nested-hidden").evaluate(
+            "element => element.srcdoc = '<p>HIDDEN-NESTED-SYNTH-338</p>'")
+        await parent.locator("#nested-visible").evaluate(
+            "element => element.srcdoc = '<p>VISIBLE-NESTED-SYNTH-449</p>'")
+        await self.page.wait_for_timeout(50)
+
+        snapshot = await observe(self.session)
+
+        self.assertIn("VISIBLE-PARENT-SYNTH-226", snapshot.text)
+        self.assertIn("VISIBLE-NESTED-SYNTH-449", snapshot.text)
+        self.assertNotIn("HIDDEN-ROOT-SYNTH-114", snapshot.text)
+        self.assertNotIn("HIDDEN-NESTED-SYNTH-338", snapshot.text)
+
+    async def test_snapshot_marks_overlay_obstruction_and_clears_it_when_hidden(self):
+        await self.page.set_content(
+            '<button id="synthetic-target">Synthetic target</button>'
+            '<div id="synthetic-overlay" style="position:fixed;inset:0;z-index:10;'
+            'background:rgba(0,0,0,.2)">Synthetic overlay</div>'
+        )
+
+        obscured = await observe(self.session)
+        button_line = next(line for line in obscured.text.splitlines()
+                           if line.startswith("[") and "Synthetic target" in line)
+        self.assertIn("OBSCURED by Synthetic overlay", button_line)
+
+        await self.page.locator("#synthetic-overlay").evaluate("element => element.remove()")
+        clear = await observe(self.session)
+        button_line = next(line for line in clear.text.splitlines()
+                           if line.startswith("[") and "Synthetic target" in line)
+        self.assertNotIn("OBSCURED", button_line)
 
 
 if __name__ == "__main__":

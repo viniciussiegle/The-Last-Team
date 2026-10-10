@@ -26,6 +26,9 @@ to be opened before their section links appear. Modal controls take priority.
 For informational notices, inspect a close button before following a link that
 would navigate away from your work. A visually similar label can have a different
 target; compare the current element's role and href.
+OBSCURED controls are covered by another visible element. Inspect that blocking
+notice, modal or prerequisite and choose its appropriate controls first; use
+look if the DOM does not explain how to resolve the obstruction.
 Checkbox/radio state is explicitly CHECKED or UNCHECKED; an HTML value does
 not indicate selection. Read each declaration before setting it; accepting
 one statement never implies accepting every adjacent statement.

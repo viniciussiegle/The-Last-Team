@@ -53,8 +53,12 @@ window for targeted followups, so a stuck worker cannot consume that phase.
   binds numbered visible elements. Snapshot contains text, digest and elements.
   Clear prior observation attributes, including hidden elements, before rebinding.
   Preserve visible block boundaries and line breaks without splitting inline text.
+  Exclude frames with hidden ancestor iframe elements. Keep original frame indices
+  for provenance. Mark controls whose viewport centre is covered by another element.
 - `act(session, action: dict) -> str` accepts generic actions using observed
   element IDs. Never accepts arbitrary JavaScript from the model.
+  fill accepts a fields array or one id/text pair. Explicit final-confirm scope
+  applies consistently to direct clicks and fill's submit control.
 - `BrowserAgent.run(task, max_steps=None) -> dict` repeatedly observes, calls
   Qwen, executes selected tools and validates record tools. It shares ledger
   updates and task state. Prompts contain roles, rules and generic vocabulary;

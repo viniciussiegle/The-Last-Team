@@ -30,7 +30,17 @@ SNAPSHOT_JS = r"""({start, expanded}) => {
     const value=type==='password'?(e.value?'[secret]':''):('value' in e?e.value:'');
     const options=e.tagName==='SELECT'?Array.from(e.options).map(o=>({value:o.value,text:o.text})):undefined;
     const checked=typeof e.checked==='boolean'?e.checked:(['checkbox','radio'].includes(type)?e.getAttribute('aria-checked')==='true':undefined);
+    const rect=e.getBoundingClientRect(), x=rect.x+rect.width/2, y=rect.y+rect.height/2;
+    let obstruction='';
+    if(x>=0&&y>=0&&x<innerWidth&&y<innerHeight){
+      const top=document.elementFromPoint(x,y);
+      if(top&&!e.contains(top)&&!top.contains(e)){
+        const blocker=top.closest('dialog,[role=dialog],[aria-modal=true],section,aside')||top;
+        obstruction=tidy(blocker.getAttribute('aria-label')||blocker.innerText||blocker.tagName).slice(0,180);
+      }
+    }
     elements.push({id,tag:e.tagName.toLowerCase(),type,label:label.slice(0,350),value,checked,
+      obstruction,
       modal:!!e.closest('dialog[open],[role=dialog],[aria-modal=true]'),
       href:e.getAttribute('href')||undefined,options,disabled:e.matches(':disabled'),readonly:!!e.readOnly,min:e.min,max:e.max});
   }
@@ -85,6 +95,16 @@ async def observe(session, max_chars: int = 26000, expanded: str = "") -> Snapsh
     next_id = 1
     for index, frame in enumerate(session.page.frames):
         try:
+            ancestor = frame
+            visible = True
+            while ancestor.parent_frame is not None:
+                container = await ancestor.frame_element()
+                if not await container.is_visible():
+                    visible = False
+                    break
+                ancestor = ancestor.parent_frame
+            if not visible:
+                continue
             data = await frame.evaluate(SNAPSHOT_JS, {"start": next_id, "expanded": expanded})
         except Exception:
             continue
@@ -110,6 +130,8 @@ async def observe(session, max_chars: int = 26000, expanded: str = "") -> Snapsh
                 details += f" min={e.get('min')} max={e.get('max')}"
             if e.get("modal"):
                 details += " MODAL"
+            if e.get("obstruction"):
+                details += " OBSCURED by " + e["obstruction"]
             if e.get("options"):
                 details += " options=" + str(e["options"])
             if e.get("href"):
