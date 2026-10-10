@@ -167,12 +167,21 @@ async def read_all(session, action: dict, max_pages: int = 20, limit: int = 4500
     The model chooses what to read; this helper only repeats its choices. It names the control that leads to the
     next page of a result set (next_id), one example of each control that opens a hidden detail of a row or field
     (reveal_ids), and optionally links to open one after another, such as chosen results or the tabs of one
-    record (open_ids). Every page is read with every such detail opened.
+    record (open_ids). Every page is read with every such detail opened. For items that share a layout the model
+    may also name, by their visible labels, the views to open on each item (follow_labels) and the detail
+    controls to open on every page (reveal_labels); nothing is opened that the model did not name.
     """
     from .snapshot import observe
     seen = session.elements
     following = alike(seen[int(action["next_id"])]) if action.get("next_id") is not None and int(action["next_id"]) in seen else None
     opening = {alike(seen[int(key)]) for key in action.get("reveal_ids") or [] if int(key) in seen}
+    reveal_labels = [str(label).casefold() for label in action.get("reveal_labels") or [] if str(label).strip()]
+    follow_labels = [str(label).casefold() for label in action.get("follow_labels") or [] if str(label).strip()]
+
+    def opens_detail(item: dict) -> bool:
+        named = (item.get("tag") in ("button", "summary") and item.get("type") != "submit" and not item.get("href")
+                 and any(label in (item.get("label") or "").casefold() for label in reveal_labels))
+        return alike(item) in opening or named
     links, skipped = [], 0
     for key in action.get("open_ids") or []:
         item = seen.get(int(key))
@@ -188,8 +197,8 @@ async def read_all(session, action: dict, max_pages: int = 20, limit: int = 4500
             snapshot = await observe(session)
             fresh = [line for line in page_lines(snapshot.text) + field_lines(snapshot.elements) if line not in emitted]
             # A page may show one opened detail at a time, so the text is taken after each one is opened.
-            for turn in range(len([key for key in snapshot.elements if alike(snapshot.elements[key]) in opening])):
-                like = [key for key in sorted(snapshot.elements) if alike(snapshot.elements[key]) in opening]
+            for turn in range(len([key for key in snapshot.elements if opens_detail(snapshot.elements[key])])):
+                like = [key for key in sorted(snapshot.elements) if opens_detail(snapshot.elements[key])]
                 if turn >= len(like):
                     break
                 try:
@@ -222,9 +231,23 @@ async def read_all(session, action: dict, max_pages: int = 20, limit: int = 4500
         parts, origin_address = [], session.page.url
         for label, address in links[:12]:
             try:
-                await session.page.goto(address, wait_until="domcontentloaded")
-                parts.append(f"=== opened: {label[:80]} ===")
-                parts += await pages_from_here()
+                # The item itself, then the views of it that the model named, each once (a named view may lead to
+                # another named view, such as a register inside a tab); nothing unnamed is opened.
+                queue, visited = [(address, "")], set()
+                while queue and len(visited) < 10:
+                    target, name = queue.pop(0)
+                    if target in visited:
+                        continue
+                    visited.add(target)
+                    await session.page.goto(target, wait_until="domcontentloaded")
+                    parts.append(f"=== opened: {label[:80]} ===" if not name else f"--- {label[:50]} / {name[:50]} ---")
+                    parts += await pages_from_here()
+                    for item in session.elements.values():
+                        shown = (item.get("label") or "").casefold()
+                        if item.get("href") and item["frame"] is session.page.main_frame and any(wanted in shown for wanted in follow_labels):
+                            view = urljoin(session.page.url, item["href"]).split("#")[0]
+                            if origin(view) in session.allowed_origins and view not in visited:
+                                queue.append((view, item.get("label") or view))
             except Exception as error:
                 parts.append(f"=== could not open {label[:80]}: {str(error).splitlines()[0][:120]} ===")
         try:

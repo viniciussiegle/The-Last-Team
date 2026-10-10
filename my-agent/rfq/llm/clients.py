@@ -29,14 +29,15 @@ class ModelClient:
         self.total_cost = 0.0
         self.answered = False
 
-    async def complete(self, agent, messages, tools=None, max_tokens=3500):
+    async def complete(self, agent, messages, tools=None, max_tokens=3500, light=False):
         started = time.monotonic()
         kwargs = {"model": self.model, "messages": messages, "max_tokens": max_tokens, "temperature": 0.15}
         if tools:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = "required"
-        if self.settings.model_extra_body:
-            kwargs["extra_body"] = self.settings.model_extra_body
+        extra = getattr(self.settings, "model_light_body", None) if light else self.settings.model_extra_body
+        if extra:
+            kwargs["extra_body"] = extra
         attempts = self.settings.model_retries + 1
         attempt = 0
         while True:

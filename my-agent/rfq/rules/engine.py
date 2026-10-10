@@ -95,10 +95,13 @@ def calculate(ledger, context, include_setup_in_surcharge=True, core_only=False)
                     f"{', '.join(unread)} and of every other candidate in group {requirement.katalog_group}")
             continue
         if not matches:
-            observed_materials = {m.number for m in materials if normalized(m.katalog_group) == normalized(requirement.katalog_group)}
+            in_group = [m for m in materials if normalized(m.katalog_group) == normalized(requirement.katalog_group)]
+            observed_materials = {m.number for m in in_group}
             coverage = [c for c in ledger.of("SearchCoverage") if c.katalog_group == requirement.katalog_group and c.complete
                         and set(c.candidate_materials) <= observed_materials]
-            if coverage:
+            # Declining to bid discards every position, so it takes a fully read group: at least one candidate,
+            # and the status of each one read, with none of them fitting.
+            if coverage and in_group and all(m.status in ("active", "blocked") for m in in_group):
                 answer.update(decision="no_bid", positions=[], total_net=Decimal(0), discount_percent=Decimal(0))
                 calc.complete = True
                 trace(pid, "no_matching_active_material", attributes, "no_bid")

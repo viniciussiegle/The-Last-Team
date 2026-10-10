@@ -57,6 +57,7 @@ class Settings:
     model_base_url_env: str = "QWEN_BASE_URL"
     model_api_key_env: str = "QWEN_API_KEY"
     model_extra_body: dict = field(default_factory=dict)
+    model_light_body: dict = field(default_factory=dict)
     model_prices: dict = field(default_factory=lambda: dict(QWEN_PRICES))
     model_concurrency: int = 8
     model_stream: bool = True
@@ -67,6 +68,7 @@ class Settings:
     model_retries: int = 2
     surcharge_includes_setup: bool = True
     rules_stage: str = "core"
+    submit_enabled: bool = True
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "Settings":
@@ -90,11 +92,14 @@ class Settings:
         if not urls and source.get("CDP_URL"):
             urls = [source["CDP_URL"]]
 
-        # The default hosted model answers without a separate reasoning pass: its steps are small choices, and
-        # reasoning tokens roughly doubled the time of every call. MODEL_EXTRA_BODY={} turns reasoning back on.
+        # Two sets of request parameters: the usual one, and a lighter one for steps that only copy known values
+        # into a form. For the default hosted model the lighter one switches the reasoning pass off, which halves
+        # the time of a call. Reading and recording values keeps reasoning: without it a full run recorded
+        # specification values that were not on the page.
         extra_body = _json_object(source.get("MODEL_EXTRA_BODY"), "MODEL_EXTRA_BODY")
-        if source.get("MODEL_EXTRA_BODY") is None and source.get("MODEL_BASE_URL_ENV", "QWEN_BASE_URL") == "QWEN_BASE_URL":
-            extra_body = dict(QWEN_PLAIN_ANSWERS)
+        light_body = _json_object(source.get("MODEL_LIGHT_EXTRA_BODY"), "MODEL_LIGHT_EXTRA_BODY") or dict(extra_body)
+        if source.get("MODEL_LIGHT_EXTRA_BODY") is None and source.get("MODEL_BASE_URL_ENV", "QWEN_BASE_URL") == "QWEN_BASE_URL":
+            light_body = {**extra_body, **QWEN_PLAIN_ANSWERS}
         prices = {**QWEN_PRICES, **{key: float(value) for key, value in
                                     _json_object(source.get("MODEL_PRICES_USD_PER_M"), "MODEL_PRICES_USD_PER_M").items()}}
         data_dir = Path(source.get("RFQ_DATA_DIR") or _default_data_dir()).expanduser().resolve()
@@ -116,6 +121,7 @@ class Settings:
             model_base_url_env=source.get("MODEL_BASE_URL_ENV", "QWEN_BASE_URL"),
             model_api_key_env=source.get("MODEL_API_KEY_ENV", "QWEN_API_KEY"),
             model_extra_body=extra_body,
+            model_light_body=light_body,
             model_prices=prices,
             model_concurrency=int(source.get("MODEL_CONCURRENCY", "8")),
             model_stream=str(source.get("MODEL_STREAM", "true")).strip().lower() in {"1", "true", "yes", "on"},
@@ -126,4 +132,6 @@ class Settings:
             model_retries=int(source.get("MODEL_RETRIES", "2")),
             surcharge_includes_setup=str(source.get("SURCHARGE_INCLUDES_SETUP", "true")).lower() in {"1", "true", "yes"},
             rules_stage=source.get("RULES_STAGE", "core"),
+            # Development only: stop after freezing the answer, without touching the submission form.
+            submit_enabled=str(source.get("RFQ_SUBMIT", "true")).strip().lower() in {"1", "true", "yes", "on"},
         )

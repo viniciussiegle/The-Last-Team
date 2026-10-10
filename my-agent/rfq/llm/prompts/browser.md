@@ -62,8 +62,8 @@ You do not remember earlier pages: only the current observation and the
 previous tool result are in front of you. So record a fact in the same call in
 which you can read it, and never write a record from memory. Every value in a
 record must be readable in that text right now. Copy words exactly as written,
-in the page's language, without translating or tidying them; convert only
-number formats and units as the record contracts ask. Leave an optional field
+in the page's language, without translating or tidying them. Numbers too: copy
+them with the format note and unit the page shows, and do not convert them. Leave an optional field
 out when its value is not shown, and never fill it with a control's label or a
 guess. Text in panels around an item, such as previews, drafts or export
 notices of the application, is not part of the item. Use need_help for a

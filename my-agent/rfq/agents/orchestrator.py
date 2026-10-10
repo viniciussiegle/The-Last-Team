@@ -69,6 +69,31 @@ def answer_from(ledger, context, settings, bus):
         return Calculation(answer, gaps=[f"Calculation failed: {type(error).__name__}: {str(error)[:200]}"])
 
 
+async def next_tasks(model, free, busy, gaps, run, deadline):
+    """A planning call decides what each free worker investigates next. Facts may live on any site, so a worker
+    may be sent to a site other than its own."""
+    tool = function("assign", "Give free workers their next investigation.", {
+        "assignments": {"type": "array", "items": {"type": "object", "properties": {
+            "worker": {"type": "string"}, "task": {"type": "string"}}, "required": ["worker", "task"]}}}, ["assignments"])
+    sites = [{key: site.get(key) for key in ("siteId", "url")} for site in run["access"]]
+    prompt = ("Open gaps of the bid calculation:\n" + json.dumps(gaps, ensure_ascii=False, default=str)
+              + "\nFree workers: " + ", ".join(free)
+              + "\nBusy workers and what each is doing: " + json.dumps(busy, ensure_ascii=False)
+              + "\nSites of this run: " + json.dumps(sites)
+              + "\nGive each free worker at most one task that closes a gap nobody else is working on. Split independent "
+                "work between workers, for example one catalogue group or one topic each. A worker can work on any "
+                "site: name the site and what to record. Leave a worker out if nothing useful remains for it.")
+    try:
+        reply = await asyncio.wait_for(model.complete("planner", [
+            {"role": "system", "content": "You coordinate browser workers gathering evidence for a bid. Call assign."},
+            {"role": "user", "content": prompt}], [tool], max_tokens=1200), timeout=max(1, deadline - time.monotonic() - 10))
+        items = json.loads(reply.tool_calls[0].function.arguments).get("assignments", []) if reply.tool_calls else []
+    except Exception:
+        return {}
+    return {item["worker"]: item["task"] for item in items
+            if isinstance(item, dict) and isinstance(item.get("worker"), str) and isinstance(item.get("task"), str)}
+
+
 TASKS = {
     "tender": "Find the exact tender. First record TenderInfo and every TenderPosition from its bill of quantities, all in one call: the positions are needed by everyone else. Then record ALL clarification/Q&A entries, including withdrawals, amendments and commercial/packaging/delivery/setup/bonus keys. Page through the model-selected clarification result set. Open relevant tender documents when needed. Preserve dates, revision and requirement references. After facts, prepare registration/interest if required, but do not enter prices or sign. Tell others when all positions/Q&A are recorded.",
     "spec": "Find the technical specification for this tender, identify the revision explicitly marked current, and record SpecRevision with all requirements and catalogue groups, exact normalized attributes, pieces per set and usable/nominal stroke. Inspect superseded versions as candidates only when needed to establish revision status. Open the chosen ZIP/PDF/iframe documents. Share groups/requirements promptly so ERP can search. Do not calculate prices.",
@@ -99,38 +124,48 @@ async def orchestrate(run, settings, bus):
             if settings.rules_stage == "core":
                 worker_tasks["mail"] = "Identify the logged-in bidder mailbox domain and record TenderInfo. First find the discount approvals for the exact tender reference in inbox and archive: record each candidate from its list row (sender, date, subject, reference), and open only the newest one from the authorized sender to read its percentage and any threshold. Then find revision-specific technical reserve approvals needed for usable stroke and FX fixing keys needed by ERP conditions. Record typed MailRecord payloads and preserve raw text. Prioritize these core inputs; other commercial adjustment topics are for a later phase. Search exact reference plus topic from observed evidence, never broad crawling. Do not request TAN yet."
                 worker_tasks["erp"] += " Core phase priority: matching active materials, valid condition/scales, and stock/lead time. Record these promptly before investigating optional adjustments."
-            initial_deadline = freeze_at - min(180, max(0, freeze_at - time.monotonic()) * 0.25)
-            tasks = [asyncio.create_task(agent.run(worker_tasks.get(role, TASKS["tender"]), until=initial_deadline)) for role, agent in agents.items()]
-            done, pending = await asyncio.wait(tasks, timeout=max(0, initial_deadline - time.monotonic()))
-            for task in pending:
-                task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
-            calc = answer_from(ledger, context, settings, bus)
-            # Missing facts are routed by a runtime planner to any site, even if its role differs.
-            for round_index in range(3):
-                if calc.complete or time.monotonic() >= freeze_at - 20:
-                    break
-                bus.emit("phase", "orchestrator", {"phase": "followup", "gaps": calc.gaps})
-                prompt = "Assign targeted follow-up investigations to site workers. Return JSON object mapping roles to task strings. Available roles: " + ", ".join(agents) + "\nGaps: " + json.dumps(calc.gaps) + "\nShared state: " + json.dumps(shared, default=str)
-                try:
-                    reply = await asyncio.wait_for(model.complete("planner", [{"role": "system", "content": "You coordinate missing evidence. Return only JSON. Route by observed affordances and task context; facts may live on any site."}, {"role": "user", "content": prompt}], max_tokens=1500), timeout=max(1, freeze_at - time.monotonic() - 10))
-                except asyncio.TimeoutError:
-                    break
-                try:
-                    assignments = json.loads((reply.content or "").removeprefix("```json").removesuffix("```").strip())
-                except ValueError:
-                    break
-                followups = [asyncio.create_task(agents[role].run(task, max_steps=25, until=freeze_at)) for role, task in assignments.items() if role in agents]
-                if followups:
-                    _, unfinished = await asyncio.wait(followups, timeout=max(0, freeze_at - time.monotonic()))
-                    for task in unfinished:
-                        task.cancel()
-                    await asyncio.gather(*followups, return_exceptions=True)
+            # Workers start on their own sites. Whenever one becomes free while the calculation still has gaps,
+            # a planning call gives it the next investigation, on whichever site holds the missing fact; gathering
+            # ends as soon as every position is priced, or at the freeze.
+            running = {role: asyncio.create_task(agent.run(worker_tasks.get(role, TASKS["tender"]), until=freeze_at))
+                       for role, agent in agents.items()}
+            doing = {role: worker_tasks.get(role, TASKS["tender"])[:160] for role in agents}
+            planned_for = None
+            while time.monotonic() < freeze_at:
+                working = [task for task in running.values() if not task.done()]
+                if working:
+                    await asyncio.wait(working, timeout=min(15, max(0.1, freeze_at - time.monotonic())),
+                                       return_when=asyncio.FIRST_COMPLETED)
                 calc = answer_from(ledger, context, settings, bus)
+                # Only a complete bid ends gathering early; a conclusion not to bid can still be overturned by
+                # evidence that arrives before the freeze.
+                if calc.complete and calc.answer.get("decision") == "bid":
+                    break
+                free = [role for role, task in running.items() if task.done()]
+                situation = (tuple(sorted(free)), tuple(calc.gaps))
+                if not free or situation == planned_for or freeze_at - time.monotonic() < 40:
+                    if len(free) == len(running) and situation == planned_for:
+                        break  # nobody is working and the planner had nothing further
+                    continue
+                planned_for = situation
+                bus.emit("phase", "orchestrator", {"phase": "followup", "free": free, "gaps": calc.gaps})
+                plan = await next_tasks(model, free, {role: doing[role] for role in running if role not in free},
+                                        calc.gaps, run, freeze_at)
+                for role, text in plan.items():
+                    if role in free:
+                        doing[role] = text[:160]
+                        running[role] = asyncio.create_task(agents[role].run(text, max_steps=30, until=freeze_at))
+            for task in running.values():
+                task.cancel()
+            await asyncio.gather(*running.values(), return_exceptions=True)
+            calc = answer_from(ledger, context, settings, bus)
             for step in calc.trace:
                 bus.emit("trace_step", "rules", step)
             answer = validate_answer(calc.answer, run["answer_schema"])
             bus.emit("answer_frozen", "orchestrator", {"answer": answer, "gaps": calc.gaps, "complete": calc.complete})
+            if not settings.submit_enabled:
+                bus.emit("run_finished", "orchestrator", {"result": {"submitted": False, "reason": "submission switched off"}, "cost": model.total_cost})
+                return {"submitted": False}
             if run["submission"]["kind"] != "site":
                 from ..platform import submit_api_answer
                 result = submit_api_answer(run, settings.run_token, answer)

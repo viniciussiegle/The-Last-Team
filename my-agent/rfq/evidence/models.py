@@ -4,9 +4,17 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from typing import Annotated
 
-from ..rules.money import day
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, field_validator
+
+from ..rules.money import LENGTH, MASS, PRESSURE, day, number
+
+# Numbers are copied from the page as written, with the page's format note and unit; code reads them.
+Num = Annotated[Decimal, BeforeValidator(number)]
+Mass = Annotated[Decimal, BeforeValidator(lambda value: number(value, MASS))]
+Length = Annotated[Decimal, BeforeValidator(lambda value: number(value, LENGTH))]
+Pressure = Annotated[Decimal, BeforeValidator(lambda value: number(value, PRESSURE))]
 
 
 class StrictModel(BaseModel):
@@ -35,7 +43,7 @@ class TenderInfo(StrictModel):
 class TenderPosition(StrictModel):
     position_id: str
     description: str
-    quantity: Decimal = Field(gt=0)
+    quantity: Num = Field(gt=0)
     unit: Literal["piece", "set"]
     requirement_ref: str
 
@@ -54,13 +62,13 @@ class QAEntry(StrictModel):
 class Requirement(StrictModel):
     requirement_id: str
     katalog_group: str
-    bore: Decimal
-    stroke: Decimal
+    bore: Length
+    stroke: Length
     stroke_kind: Literal["nominal", "usable"] = "nominal"
-    pressure: Decimal
+    pressure: Pressure
     mounting: str
     certification: str
-    pieces_per_set: Decimal | None = None
+    pieces_per_set: Num | None = None
 
 
 class SpecRevision(StrictModel):
@@ -74,26 +82,26 @@ class Material(StrictModel):
     number: str
     status: Literal["active", "blocked", "other"] | None = None
     katalog_group: str
-    bore: Decimal
-    stroke: Decimal
-    pressure: Decimal
+    bore: Length
+    stroke: Length
+    pressure: Pressure
     mounting: str
     certification: str
-    stock_qty: Decimal | None = None
+    stock_qty: Num | None = None
     lead_weeks_stock: int | None = None
     lead_weeks_production: int | None = None
-    carton_size: Decimal | None = None
-    surcharge_mass: Decimal | None = None
-    allocation_mass: Decimal | None = None
-    setup_fee: Decimal | None = None
+    carton_size: Num | None = None
+    surcharge_mass: Mass | None = None
+    allocation_mass: Mass | None = None
+    setup_fee: Num | None = None
     surcharge_index: str | None = None
-    surcharge_rate: Decimal | None = None
+    surcharge_rate: Num | None = None
     surcharge_formula: dict | None = None
 
 
 class PriceScale(StrictModel):
-    min_qty: Decimal
-    price: Decimal
+    min_qty: Num
+    price: Num
 
 
 class PriceCondition(StrictModel):
@@ -108,7 +116,7 @@ class PriceCondition(StrictModel):
 
     currency: str
     fx_key: str | None = None
-    price_unit_qty: Decimal = Field(gt=0)
+    price_unit_qty: Num = Field(gt=0)
     scales: list[PriceScale]
 
 
@@ -144,9 +152,12 @@ RECORD_TYPES = {cls.__name__: cls for cls in (TenderInfo, TenderPosition, QAEntr
 
 
 PAYLOAD_GUIDE = """
-All dates need an explicit timezone; normalize technical length to mm, pressure
-to bar and mass to kg, preserving source values in snippets. Monetary/quantity
-values use decimal strings with '.' as decimal separator, no thousands marks.
+All dates need an explicit timezone. Copy every number exactly as the page writes
+it, as a string, together with the number-format note the page gives for it (such
+as a locale tag in brackets) and its unit: for example "412,750 (en-US)",
+"1.905,30 (de-DE)", "840 g", "30 cm". Never convert, round or reformat a number
+yourself; the same digits mean different amounts in different formats, and code
+reads them. Lengths end up in mm, pressures in bar, masses in kg.
 QA payloads: quantity_change {quantity}; technical_amendment {attributes: {field:value}};
 condition_group/packaging_tariff_key/delivery_commitment_key/setup_pool_membership/
 bonus_membership {key}. For multiple positions, record one QAEntry per position.

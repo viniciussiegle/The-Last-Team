@@ -28,6 +28,10 @@ ACTION = {
     "next_id": {"type": "integer", "description": "read_all: the control that leads to the next page of this result set"},
     "reveal_ids": {"type": "array", "items": {"type": "integer"},
                    "description": "read_all: one example of each control that opens a hidden detail of a row or field"},
+    "follow_labels": {"type": "array", "items": {"type": "string"},
+                      "description": "read_all with open_ids: visible names of the views to open on each opened item, such as its tabs"},
+    "reveal_labels": {"type": "array", "items": {"type": "string"},
+                      "description": "read_all: visible names of the detail controls to open on every page read"},
     "open_ids": {"type": "array", "items": {"type": "integer"},
                  "description": "read_all: links to open and read one after another, such as chosen results or the tabs of one record"},
 }
@@ -152,7 +156,8 @@ class BrowserAgent:
                     image = None
                 else:
                     messages.append({"role": "user", "content": content})
-                call = self.model.complete(self.name, messages, TOOLS + ([TAN_TOOL] if self.tan_fetcher and submit else []))
+                # Filling the form from the frozen answer copies known values; it does not need the reasoning pass.
+                call = self.model.complete(self.name, messages, TOOLS + ([TAN_TOOL] if self.tan_fetcher and submit else []), light=submit)
                 reply = await asyncio.wait_for(call, timeout=max(1, min(360, until - time.monotonic()))) if until else await call
                 tool_result = ""
                 if not reply.tool_calls:
