@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import datetime, timezone, timedelta
 
@@ -15,6 +16,7 @@ class Ledger:
         self.keys = set()
         self.allow_tan = False
         self.tan_context = None
+        self.changed = asyncio.Event()
 
     def schema_text(self):
         return json.dumps({k: v.model_json_schema() for k, v in RECORD_TYPES.items()}, ensure_ascii=False) + "\n" + PAYLOAD_GUIDE
@@ -80,6 +82,7 @@ class Ledger:
             snippet=snippet[:300], observed_at=datetime.now(timezone.utc), agent=agent)
         self.records.append((kind, record, provenance))
         self.keys.add(key)
+        self.changed.set()
         payload = record.model_dump(mode="json")
         if kind == "TAN":
             if hasattr(self.bus, "add_secret"):
@@ -93,6 +96,22 @@ class Ledger:
 
     def of(self, kind):
         return [record for name, record, _ in self.records if name == kind]
+
+    async def wait_for_change(self, kind, count, timeout_s):
+        if kind not in RECORD_TYPES:
+            raise ValueError("Unknown evidence kind")
+        loop = asyncio.get_running_loop()
+        end = loop.time() + max(0, timeout_s)
+        while len(self.of(kind)) <= count:
+            remaining = end - loop.time()
+            if remaining <= 0:
+                return False
+            self.changed.clear()
+            try:
+                await asyncio.wait_for(self.changed.wait(), remaining)
+            except asyncio.TimeoutError:
+                return False
+        return True
 
     def summary(self, role=None, max_chars=16000):
         """Keep complete dependency records within a bounded, valid JSON view."""

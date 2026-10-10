@@ -112,6 +112,29 @@ class AgentRecordStop(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(old_secret, str(bus.events))
         self.assertNotIn(new_secret, str(bus.events))
 
+    async def test_wait_for_evidence_tool_is_accepted_and_capped_by_worker_deadline(self):
+        wait_reply = tool_reply("wait_for_evidence", {
+            "record_kind": "TenderInfo",
+            "timeout_seconds": 90,
+        })
+        agent, model, _ledger, bus, _session, snapshot = self.make_agent(
+            [wait_reply, self.done_reply()], allow_tan=False)
+
+        async def changed(kind, count, timeout_s):
+            self.assertEqual((kind, count, timeout_s), ("TenderInfo", 0, 25))
+            return True
+
+        with patch("rfq.agents.base.recover", new=AsyncMock()), \
+             patch("rfq.agents.base.observe", new=AsyncMock(return_value=snapshot)), \
+             patch("rfq.agents.base.time.monotonic", return_value=100.0), \
+             patch.object(agent.ledger, "wait_for_change", new=changed):
+            result = await agent.run("Synthetic task", max_steps=3, until=125.0)
+
+        self.assertEqual(model.calls, 2)
+        self.assertEqual(result["summary"], "Synthetic task complete")
+        self.assertEqual([event["type"] for event in bus.events],
+                         ["observation", "dependency_wait", "observation", "agent_done"])
+
 
 if __name__ == "__main__":
     unittest.main()

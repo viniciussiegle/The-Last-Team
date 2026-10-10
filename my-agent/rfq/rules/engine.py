@@ -50,6 +50,7 @@ def calculate(ledger, context, include_setup_in_surcharge=True, core_only=False)
         material_records[material.number] = prior.model_copy(update=updates) if prior else material
     materials = list(material_records.values())
     lines = {}
+    pooled = {}
     for position in resolved.positions:
         pid = position.position_id
         requirement = requirements.get(position.requirement_ref)
@@ -101,6 +102,8 @@ def calculate(ledger, context, include_setup_in_surcharge=True, core_only=False)
             missing(f"Position {pid}: multiple exact active materials; verify distinguishing attributes/status")
             continue
         material = matches[0]
+        # Known demand consumes shared stock even when that line's price is missing.
+        pooled[material.number] = pooled.get(material.number, Decimal(0)) + quantity
         prices = [p for p in ledger.of("PriceCondition") if p.material == material.number and on_date(p.valid_from) <= scenario <= on_date(p.valid_to)]
         if not prices:
             missing(f"Material {material.number}: full condition valid on scenario date with price unit/currency and all scales")
@@ -158,9 +161,6 @@ def calculate(ledger, context, include_setup_in_surcharge=True, core_only=False)
         for pid, value in allocated.items():
             lines[pid]["bonus"] = value
         trace(None, "project_bonus", {"goods": eligible, "bands": bonus["bands"]}, allocated)
-    pooled = {}
-    for line in lines.values():
-        pooled[line["material"].number] = pooled.get(line["material"].number, Decimal(0)) + line["qty"]
     for pid, line in lines.items():
         m, qty, base = line["material"], line["qty"], line["base"]
         if core_only:

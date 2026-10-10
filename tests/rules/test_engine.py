@@ -203,6 +203,23 @@ class PricingAndSelection(unittest.TestCase):
         self.assertEqual(lines["P2"]["lead_time_weeks"], 7)
         self.assertEqual(result.answer["total_net"], Decimal("70.00"))
 
+    def test_unpriced_sibling_still_contributes_to_pooled_stock_demand(self):
+        positions = [position("P-SMALL", "2"), position("P-LARGE", "6")]
+        shared = material(stock_qty="7", lead_weeks_stock=2, lead_weeks_production=6)
+        only_large_scale = condition(scales=[{"min_qty": "5", "price": "10"}])
+
+        result = calculate(ledger(positions=positions, materials=[shared], prices=[only_large_scale]),
+                           context(), core_only=True)
+
+        lines = answer_lines(result)
+        self.assertFalse(result.complete)
+        self.assertEqual(set(lines), {"P-LARGE"})
+        self.assertEqual(lines["P-LARGE"]["quantity"], 6)
+        self.assertEqual(lines["P-LARGE"]["material_number"], "MAT-1")
+        self.assertEqual(lines["P-LARGE"]["lead_time_weeks"], 6)
+        self.assertTrue(any("quantity scale" in gap.lower() and "2" in gap for gap in result.gaps))
+        self.assertEqual(result.answer["total_net"], Decimal("60.00"))
+
     def test_fx_and_price_unit_are_normalized_before_half_up_rounding(self):
         priced = condition(price="100.5", currency="USD", unit_qty="100", fx_key="USD-EUR")
         fx = mail("fx-rate", "devisenfixing", {"rates": {"USD-EUR": "1"}})

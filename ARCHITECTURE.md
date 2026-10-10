@@ -70,6 +70,11 @@ window for targeted followups, so a stuck worker cannot consume that phase.
   one-minute intervals. Missing metadata is reported explicitly.
   Closed selected popups recover to a surviving page in the same supplied
   browser; new popup pages receive the normal action timeout.
+- `await Ledger.wait_for_change(kind, count, timeout_s) -> bool` waits for an
+  appended record of the requested kind. Unrelated records do not satisfy it.
+  The model-selected `wait_for_evidence` tool captures counts before its model
+  call, caps waiting at 30 seconds and respects the current worker deadline.
+  Workers publish specification pages promptly and reuse active peers' findings.
 - Event types: run_started, phase, agent_step, relogin, retry, escalation,
   record_added, record_rejected, trace_step, answer_frozen, submit_step,
   run_finished. Step thought summaries are concise decision explanations.

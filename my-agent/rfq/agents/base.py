@@ -5,6 +5,7 @@ import re
 import asyncio
 import time
 from pathlib import Path
+from collections import Counter
 
 from ..browser.actions import act
 from ..browser.guards import recover
@@ -38,6 +39,10 @@ TOOLS = [
     function("need_help", "Request a missing dependency or report an evidence conflict.", {
         "question": {"type": "string"}
     }, ["question"]),
+    function("wait_for_evidence", "Wait briefly for a specific kind of shared record when another active worker is investigating that dependency. Reuse already available facts first.", {
+        "record_kind": {"type": "string"},
+        "timeout_seconds": {"type": "number", "minimum": 0, "maximum": 30}
+    }, ["record_kind"]),
 ]
 
 TAN_TOOL = function("fetch_signing_tan", "After requesting a TAN on the portal, ask the mailbox worker for the current signing code. Include the portal's request metadata when displayed. Never invent request identifiers or request another TAN while using this one.", {
@@ -72,6 +77,8 @@ class BrowserAgent:
         return result
 
     async def run(self, task: str, max_steps=None, until=None, submit=False, stop_record=None):
+        worker_status = self.shared.setdefault("worker_status", {})
+        worker_status[self.name] = "running"
         system = Path(__file__).parents[1].joinpath("llm/prompts/browser.md").read_text(encoding="utf-8")
         record_schema = self.ledger.schema_text() if self.ledger else "No evidence records required for orientation."
         system += "\nRECORD CONTRACTS\n" + record_schema
@@ -84,6 +91,7 @@ class BrowserAgent:
         image = None
         for step in range(max_steps or self.settings.max_steps):
             if until and time.monotonic() >= until:
+                worker_status[self.name] = "time limit"
                 return {"summary": self.summary, "gaps": ["Task time budget exhausted"]}
             try:
                 await recover(self.session, self.bus, self.name)
@@ -101,6 +109,7 @@ class BrowserAgent:
                     self.session.last_good_urls[origin(self.session.page.url)] = self.session.page.url
                 shared = json.dumps(self.shared, ensure_ascii=False, default=str)
                 known = self.ledger.summary(self.name) if self.ledger else ""
+                evidence_counts = Counter(kind for kind, _, _ in self.ledger.records) if self.ledger else {}
                 remaining_steps = (max_steps or self.settings.max_steps) - step
                 content = f"Steps remaining: {remaining_steps}. Finish with done before exhausting them; state gaps explicitly.\nShared worker updates: {shared[-10000:]}\nEvidence ledger: {known}\nPrevious tool result: {tool_result[-14000:]}\nCURRENT OBSERVATION:\n{snapshot.text}"
                 messages = [{"role": "system", "content": system}, {"role": "user", "content": task_text}]
@@ -124,9 +133,10 @@ class BrowserAgent:
                 for call in reply.tool_calls:
                     args = json.loads(call.function.arguments)
                     name = call.function.name
-                    if name not in {"done", "need_help", "record", "browser", "fetch_signing_tan"}:
+                    if name not in {"done", "need_help", "record", "browser", "fetch_signing_tan", "wait_for_evidence"}:
                         raise ValueError("Unknown tool name returned: " + name)
                     if name == "done":
+                        worker_status[self.name] = "done"
                         self.summary = args["summary"]
                         self.shared[self.name] = args
                         self.bus.emit("agent_done", self.name, args)
@@ -135,6 +145,15 @@ class BrowserAgent:
                         self.shared[self.name] = {"question": args["question"]}
                         self.bus.emit("dependency", self.name, args)
                         tool_result += "Dependency shared. Continue independent investigation or done with explicit gaps.\n"
+                    elif name == "wait_for_evidence" and self.ledger:
+                        kind = args["record_kind"]
+                        timeout = min(30, max(0, float(args.get("timeout_seconds", 20))))
+                        if until:
+                            timeout = min(timeout, max(0, until - time.monotonic()))
+                        changed = await self.ledger.wait_for_change(kind, evidence_counts.get(kind, 0), timeout)
+                        self.bus.emit("dependency_wait", self.name, {"kind": kind, "changed": changed})
+                        tool_result += ("New shared evidence arrived. Re-read the ledger and continue your assigned task.\n" if changed
+                                        else "No new requested evidence yet. Inspect shared worker status and existing facts before deciding the next step.\n")
                     elif name == "fetch_signing_tan" and self.tan_fetcher and submit:
                         tool_result += await self.tan_fetcher(args)
                     elif name == "record":
@@ -142,6 +161,7 @@ class BrowserAgent:
                             result = self.ledger.add(args["kind"], args["data"], self.session, self.name, args.get("snippet", ""), args.get("frame_path", "frame/0"))
                             tool_result += str(result) + "\n"
                             if stop_record == args["kind"] and result == "Recorded " + stop_record:
+                                worker_status[self.name] = "done"
                                 self.summary = "Requested evidence recorded."
                                 outcome = {"summary": self.summary, "recorded": stop_record}
                                 self.shared[self.name] = outcome
@@ -172,6 +192,9 @@ class BrowserAgent:
                 history.append({"role": "assistant", "content": "\n".join(action_notes)})
                 history.append({"role": "user", "content": "Results: " + tool_result[:8000]})
                 self.step_count += 1
+            except asyncio.CancelledError:
+                worker_status[self.name] = "paused at phase deadline"
+                raise
             except Exception as error:
                 tool_result = f"Tool/observation error: {type(error).__name__}: {str(error)[:1500]}. Adapt using a fresh observation."
                 for site in [self.session.site, *self.session.sites_by_origin.values()]:
@@ -182,4 +205,5 @@ class BrowserAgent:
                 if self.settings.run_token:
                     tool_result = tool_result.replace(self.settings.run_token, "[run token]")
                 self.bus.emit("retry", self.name, {"step": step, "reason": tool_result})
+        worker_status[self.name] = "step limit"
         return {"summary": self.summary, "gaps": ["Step limit reached"]}
