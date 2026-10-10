@@ -108,6 +108,7 @@ class BrowserAgent:
         history = []
         hashes = []
         tool_result = ""
+        reading = ""
         image = None
         slow_reads = 0
         for step in range(max_steps or self.settings.max_steps):
@@ -133,7 +134,7 @@ class BrowserAgent:
                 known = self.ledger.summary(self.name) if self.ledger else ""
                 evidence_counts = Counter(kind for kind, _, _ in self.ledger.records) if self.ledger else {}
                 remaining_steps = (max_steps or self.settings.max_steps) - step
-                content = f"Steps remaining: {remaining_steps}. Finish with done before exhausting them; state gaps explicitly.\nShared worker updates: {shared[-10000:]}\nEvidence ledger: {known}\nPrevious tool result: {tool_result[:45000]}\nCURRENT OBSERVATION:\n{snapshot.text}"
+                content = f"Steps remaining: {remaining_steps}. Finish with done before exhausting them; state gaps explicitly.\nShared worker updates: {shared[-10000:]}\nEvidence ledger: {known}\nPrevious tool result: {(reading + tool_result)[:45000]}\nCURRENT OBSERVATION:\n{snapshot.text}"
                 messages = [{"role": "system", "content": system}, {"role": "user", "content": task_text}]
                 messages.extend(history[-6:])
                 if image:
@@ -201,6 +202,7 @@ class BrowserAgent:
                         if any(item.get("confirm_final") for item in batch) and not submit:
                             raise ValueError("Binding confirmation is reserved for the frozen-answer submitter")
                         browser_used = True
+                        reading = ""
                         # Ids are renumbered per observation, so the log names each control as the model saw it.
                         seen = self.session.elements
                         targets = [(seen.get(item["id"]) or {}).get("label", "")[:60] if isinstance(item.get("id"), int) else ""
@@ -221,7 +223,14 @@ class BrowserAgent:
                     action_notes.append(f"{name}: {json.dumps(args, ensure_ascii=False)}")
                 history.append({"role": "assistant", "content": "\n".join(action_notes)})
                 # A long reading is shown once in full; the running history keeps only its start.
-                kept = tool_result if len(tool_result) <= 2500 else tool_result[:1500] + "\n[long result shown once in full; record from it now]"
+                # A long reading stays in front of the model while it only records from it, and leaves with the
+                # next browser action; the running history keeps just its start.
+                kept = tool_result
+                if len(tool_result) > 2500:
+                    if browser_used:
+                        reading = tool_result + "\n[this reading stays visible until your next browser action]\n"
+                        tool_result = ""
+                    kept = kept[:1500] + "\n[long reading; kept in view while you record from it]"
                 history.append({"role": "user", "content": "Results: " + kept})
                 self.step_count += 1
             except asyncio.CancelledError:
