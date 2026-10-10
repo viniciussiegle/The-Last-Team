@@ -8,6 +8,10 @@ from openai import AsyncOpenAI
 from openai.types.chat import ChatCompletionMessage
 
 
+class ThoughtTooLong(Exception):
+    """The model was still reasoning when the time allowed before an answer begins had passed."""
+
+
 class ModelClient:
     """One chat-completions interface for whichever model the configuration selects.
 
@@ -17,6 +21,9 @@ class ModelClient:
     A request is occasionally left without any response while the service answers others normally. Answers are
     therefore read as a stream: a healthy call starts within a couple of seconds, so one that has sent nothing
     after a short limit is abandoned and sent again instead of being waited on.
+
+    Reasoning usually takes a few seconds but now and then runs on for minutes. It gets a time limit: an answer
+    that has not begun by then, or that reasoning used up, is asked for once more without the reasoning pass.
     """
 
     def __init__(self, settings, bus):
@@ -35,18 +42,23 @@ class ModelClient:
         if tools:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = "required"
-        extra = getattr(self.settings, "model_light_body", None) if light else self.settings.model_extra_body
+        plain = getattr(self.settings, "model_light_body", None)
+        extra = plain if light else self.settings.model_extra_body
         if extra:
             kwargs["extra_body"] = extra
         attempts = self.settings.model_retries + 1
         attempt = 0
         while True:
             attempt += 1
+            reasoning = bool(plain) and kwargs.get("extra_body") != plain
+            limit = getattr(self.settings, "model_think_limit_s", None) if reasoning else None
             try:
                 async with self.semaphore:
-                    message, usage, finish = await (self.streamed(kwargs) if self.settings.model_stream else self.whole(kwargs))
+                    message, usage, finish = await (self.streamed(kwargs, limit) if self.settings.model_stream else self.whole(kwargs))
             except asyncio.CancelledError:
                 raise
+            except ThoughtTooLong:
+                why = f"still reasoning after {limit} s"
             except Exception as error:
                 self.bus.emit("model_retry", agent, {"model": self.model, "attempt": attempt, "of": attempts,
                                                      "waited": round(time.monotonic() - started, 1),
@@ -55,16 +67,20 @@ class ModelClient:
                     raise
                 await asyncio.sleep(min(attempt, 4))
                 continue
-            self.answered = True
-            self.account(agent, usage, finish, started)
-            # Reasoning counts against the output allowance, so a cut-off answer can be empty or half a tool call.
-            if finish == "length" and attempt < attempts:
+            else:
+                self.answered = True
+                self.account(agent, usage, finish, started)
+                # Reasoning counts against the output allowance, so a cut-off answer can be empty or half a tool call.
+                if finish != "length" or (attempt >= attempts and not reasoning):
+                    return message
+                why = "answer cut off at the output allowance"
+            if reasoning:
+                kwargs["extra_body"] = plain
+                attempts = max(attempts, attempt + 1)  # the plain answer is the way out, so it is always asked for
+            else:
                 kwargs["max_tokens"] = min(kwargs["max_tokens"] * 2, 12000)
-                self.bus.emit("model_retry", agent, {"model": self.model, "attempt": attempt, "of": attempts,
-                                                     "reason": "answer cut off at the output allowance",
-                                                     "next_max_tokens": kwargs["max_tokens"]})
-                continue
-            return message
+            self.bus.emit("model_retry", agent, {"model": self.model, "attempt": attempt, "of": attempts, "reason": why,
+                                                 "next": "without reasoning" if reasoning else f"max_tokens {kwargs['max_tokens']}"})
 
     def wake_allowance(self, usual):
         """A hosted model may need minutes to wake for its first answer; afterwards a silent call is a stuck one."""
@@ -76,7 +92,7 @@ class ModelClient:
         choice = response.choices[0]
         return choice.message, response.usage.model_dump() if response.usage else {}, choice.finish_reason
 
-    async def streamed(self, kwargs):
+    async def streamed(self, kwargs, think_limit=None):
         began = time.monotonic()
         end = began + self.wake_allowance(self.settings.model_call_timeout_s)
         first_by = began + self.wake_allowance(self.settings.model_first_chunk_timeout_s)
@@ -113,6 +129,9 @@ class ModelClient:
                         if part.function:
                             call["name"] += part.function.name or ""
                             call["arguments"] += part.function.arguments or ""
+                # Chunks that carry neither text nor a tool call are the reasoning pass.
+                if think_limit and not calls and not "".join(content).strip() and time.monotonic() - began - first_chunk > think_limit:
+                    raise ThoughtTooLong
         finally:
             await stream.close()
         if finish is None:

@@ -70,7 +70,7 @@ class ModelEndpoint(unittest.IsolatedAsyncioTestCase):
             if plan == "silent":
                 self.held.append(writer)  # connection accepted, nothing ever sent
                 return
-            chunks = ANSWER if plan == "half" else plan
+            chunks = ANSWER if plan in ("half", "thinking") else plan
             if not request.get("stream"):
                 text = "".join(c["choices"][0]["delta"].get("content") or "" for c in chunks if c["choices"])
                 finish = next(c["choices"][0]["finish_reason"] for c in chunks if c["choices"] and c["choices"][0]["finish_reason"])
@@ -84,6 +84,15 @@ class ModelEndpoint(unittest.IsolatedAsyncioTestCase):
                 writer.close()
                 return
             writer.write(b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n")
+            if plan == "thinking":  # reasoning arrives steadily and no answer ever begins
+                try:
+                    for _ in range(100):
+                        writer.write(b"data: " + json.dumps(chunk({"reasoning_content": "synthetic thought "})).encode() + b"\n\n")
+                        await writer.drain()
+                        await asyncio.sleep(0.05)
+                except ConnectionError:
+                    pass
+                return
             for position, part in enumerate(chunks):
                 writer.write(b"data: " + json.dumps(part).encode() + b"\n\n")
                 await writer.drain()
@@ -196,6 +205,27 @@ class ModelEndpoint(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(reply.content)
         self.assertEqual([request["max_tokens"] for request in self.requests], [800, 1600])
+
+    async def test_an_answer_used_up_by_reasoning_is_asked_again_without_reasoning(self):
+        model = self.client(await self.serve(CUT_OFF, ANSWER), model_light_body={"synthetic_switch": "plain"}, model_retries=0)
+
+        reply = await self.ask(model, max_tokens=800)
+
+        self.assertEqual(reply.content, "synthetic answer")
+        self.assertEqual([request.get("synthetic_switch") for request in self.requests], [None, "plain"])
+        self.assertEqual([request["max_tokens"] for request in self.requests], [800, 800])
+
+    async def test_reasoning_that_runs_on_is_cut_short_and_asked_again_without_reasoning(self):
+        model = self.client(await self.serve("thinking", ANSWER), model_light_body={"synthetic_switch": "plain"},
+                            model_think_limit_s=0.3)
+        started = time.monotonic()
+
+        reply = await self.ask(model)
+
+        self.assertEqual(reply.content, "synthetic answer")
+        self.assertLess(time.monotonic() - started, 3)  # the reasoning alone would have gone on for five seconds
+        self.assertEqual([request.get("synthetic_switch") for request in self.requests], [None, "plain"])
+        self.assertEqual([r["next"] for r in self.bus.of("model_retry")], ["without reasoning"])
 
     async def test_only_the_first_answer_gets_the_long_wake_up_allowance(self):
         model = self.client(await self.serve(ANSWER, "silent", ANSWER), model_first_call_timeout_s=30)

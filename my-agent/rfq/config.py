@@ -65,6 +65,8 @@ class Settings:
     model_chunk_gap_timeout_s: int = 20
     model_call_timeout_s: int = 180
     model_first_call_timeout_s: int = 360
+    # Longest wait for an answer to begin once the model has started reasoning; then it is asked without reasoning.
+    model_think_limit_s: int = 30
     model_retries: int = 2
     surcharge_includes_setup: bool = True
     rules_stage: str = "core"
@@ -92,10 +94,9 @@ class Settings:
         if not urls and source.get("CDP_URL"):
             urls = [source["CDP_URL"]]
 
-        # Two sets of request parameters: the usual one, and a lighter one for steps that only copy known values
-        # into a form. For the default hosted model the lighter one switches the reasoning pass off, which halves
-        # the time of a call. Reading and recording values keeps reasoning: without it a full run recorded
-        # specification values that were not on the page.
+        # Two sets of request parameters: the usual one, and a plainer one used when the usual one takes too long.
+        # For the default hosted model the plainer one switches the reasoning pass off. Reasoning stays the rule:
+        # without it a full run recorded specification values that were not on the page.
         extra_body = _json_object(source.get("MODEL_EXTRA_BODY"), "MODEL_EXTRA_BODY")
         light_body = _json_object(source.get("MODEL_LIGHT_EXTRA_BODY"), "MODEL_LIGHT_EXTRA_BODY") or dict(extra_body)
         if source.get("MODEL_LIGHT_EXTRA_BODY") is None and source.get("MODEL_BASE_URL_ENV", "QWEN_BASE_URL") == "QWEN_BASE_URL":
@@ -129,6 +130,7 @@ class Settings:
             model_chunk_gap_timeout_s=int(source.get("MODEL_CHUNK_GAP_TIMEOUT_S", "20")),
             model_call_timeout_s=int(source.get("MODEL_CALL_TIMEOUT_S", "180")),
             model_first_call_timeout_s=int(source.get("MODEL_FIRST_CALL_TIMEOUT_S", "360")),
+            model_think_limit_s=int(source.get("MODEL_THINK_LIMIT_S", "30")),
             model_retries=int(source.get("MODEL_RETRIES", "2")),
             surcharge_includes_setup=str(source.get("SURCHARGE_INCLUDES_SETUP", "true")).lower() in {"1", "true", "yes"},
             rules_stage=source.get("RULES_STAGE", "core"),

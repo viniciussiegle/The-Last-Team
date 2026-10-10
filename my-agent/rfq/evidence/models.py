@@ -15,6 +15,7 @@ Num = Annotated[Decimal, BeforeValidator(number)]
 Mass = Annotated[Decimal, BeforeValidator(lambda value: number(value, MASS))]
 Length = Annotated[Decimal, BeforeValidator(lambda value: number(value, LENGTH))]
 Pressure = Annotated[Decimal, BeforeValidator(lambda value: number(value, PRESSURE))]
+Weeks = Annotated[int, BeforeValidator(lambda value: value if isinstance(value, int) else int(number(value)))]
 
 
 class StrictModel(BaseModel):
@@ -88,8 +89,8 @@ class Material(StrictModel):
     mounting: str
     certification: str
     stock_qty: Num | None = None
-    lead_weeks_stock: int | None = None
-    lead_weeks_production: int | None = None
+    lead_weeks_stock: Weeks | None = None
+    lead_weeks_production: Weeks | None = None
     carton_size: Num | None = None
     surcharge_mass: Mass | None = None
     allocation_mass: Mass | None = None

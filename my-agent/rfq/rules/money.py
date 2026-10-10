@@ -19,7 +19,8 @@ MASS = {"kg": Decimal(1), "g": Decimal("0.001")}
 LENGTH = {"mm": Decimal(1), "cm": Decimal(10), "m": Decimal(1000)}
 PRESSURE = {"bar": Decimal(1)}
 # Words that may stand next to a number without changing it.
-BESIDE_A_NUMBER = {"eur", "€", "%", "st", "stk", "stück", "stueck", "pc", "pcs", "piece", "pieces", "je", "pro", "per"}
+BESIDE_A_NUMBER = {"eur", "€", "%", "st", "stk", "stück", "stueck", "pc", "pcs", "piece", "pieces", "je", "pro", "per",
+                   "karton", "carton", "wochen", "woche", "weeks", "week"}
 
 
 def number(value, units=None) -> Decimal:
