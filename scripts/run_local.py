@@ -7,6 +7,7 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -63,15 +64,42 @@ def _cli_path() -> str | None:
     return None
 
 
+SCOUT_TIMEOUT_S = 45
+
+
+def _end_tree(process: subprocess.Popen) -> None:
+    """Stop a command together with every process it started."""
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/T", "/F", "/PID", str(process.pid)], capture_output=True, check=False)
+    else:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    try:
+        process.communicate(timeout=10)
+    except subprocess.TimeoutExpired:
+        pass
+
+
 def _scout_env() -> dict[str, str]:
     cli = _cli_path()
     if not cli:
         raise RuntimeError("Atira CLI was not found; set ATIRA_CLI or provide CHALLENGE_SCOUTING")
     command = [cli, "scout", "--challenge", "rfq", "--env"]
-    result = subprocess.run(command, cwd=ROOT, capture_output=True, text=True, encoding="utf-8", check=False, timeout=60)
-    if result.returncode:
-        raise RuntimeError(f"Atira scout command failed (exit {result.returncode})")
-    parsed = _parse_assignments(result.stdout)
+    process = subprocess.Popen(command, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8",
+                               start_new_session=os.name != "nt")
+    try:
+        stdout, _ = process.communicate(timeout=SCOUT_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        # The CLI is a wrapper around another process; ending only the wrapper leaves the output pipes open
+        # and the wait would never return.
+        _end_tree(process)
+        raise RuntimeError(f"Atira scout command gave no result within {SCOUT_TIMEOUT_S} s; "
+                           "set CHALLENGE_SCOUTING and the model variables to run without it") from None
+    if process.returncode:
+        raise RuntimeError(f"Atira scout command failed (exit {process.returncode})")
+    parsed = _parse_assignments(stdout)
     if not parsed:
         raise RuntimeError("Atira scout output contained no recognized environment assignments")
     return parsed

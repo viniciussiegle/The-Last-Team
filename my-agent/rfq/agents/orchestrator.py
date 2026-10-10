@@ -68,7 +68,7 @@ async def orchestrate(run, settings, bus):
     model = QwenClient(settings, bus)
     ledger = Ledger(bus)
     freeze_at, end_at = deadlines(run, settings)
-    bus.emit("run_started", "orchestrator", {"budget_s": settings.run_budget_s, "frontier": False})
+    bus.emit("run_started", "orchestrator", {"budget_s": settings.run_budget_s, "model": settings.model_name})
     async with async_playwright() as playwright:
         context_task = asyncio.create_task(plan_context(model, run))
         sessions = await asyncio.gather(*(BrowserSession.connect(playwright, settings, site, i, run["access"])

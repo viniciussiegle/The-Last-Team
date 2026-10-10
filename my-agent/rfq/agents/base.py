@@ -197,6 +197,10 @@ class BrowserAgent:
                         if any(item.get("confirm_final") for item in batch) and not submit:
                             raise ValueError("Binding confirmation is reserved for the frozen-answer submitter")
                         browser_used = True
+                        # Ids are renumbered per observation, so the log names each control as the model saw it.
+                        seen = self.session.elements
+                        targets = [(seen.get(item["id"]) or {}).get("label", "")[:60] if isinstance(item.get("id"), int) else ""
+                                   for item in batch]
                         output = await act_many(self.session, batch)
                         if isinstance(output, dict):
                             image = output["image"]
@@ -204,6 +208,8 @@ class BrowserAgent:
                         tool_result += self.scrub(str(output)) + "\n"
                         logged_action = [{"kind": item["kind"], "id": item.get("id"), "values": "[submission fields]"}
                                          if submit and item["kind"] in ("type", "fill") else item for item in batch]
+                        logged_action = [{**item, "target": target} if target else item
+                                         for item, target in zip(logged_action, targets)]
                         logged_action = logged_action[0] if len(logged_action) == 1 else logged_action
                         self.bus.emit("agent_step", self.name, {"step": self.step_count, "goal": task[:200],
                             "thought": args.get("reason", "")[:200], "action": logged_action,

@@ -65,9 +65,8 @@ async def login(session) -> str:
 async def abandon(session, bus=None, agent=""):
     """Replace a tab that stopped responding with a fresh one at the last working address."""
     stuck = session.page
-    session.page = await session.context.new_page()
-    session.install_handlers(session.page)
-    target = session.last_good_urls.get(_origin(session.last_good_url), session.last_good_url) or session.site["url"]
+    session.page = await session.new_tab()
+    target =session.last_good_urls.get(_origin(session.last_good_url), session.last_good_url) or session.site["url"]
     try:
         await session.page.goto(target, wait_until="domcontentloaded", timeout=15000)
     except Exception:
@@ -89,8 +88,7 @@ async def recover(session, bus=None, agent=""):
             session.page = remaining[0]
             await session.page.bring_to_front()
         else:
-            session.page = await session.context.new_page()
-            session.install_handlers(session.page)
+            session.page = await session.new_tab()
             await session.page.goto(session.last_good_url or session.site["url"], wait_until="domcontentloaded")
         session.notices.append("Selected tab closed; restored a remaining working tab.")
     await consent(session)
@@ -102,7 +100,9 @@ async def recover(session, bus=None, agent=""):
         return
     # A page with form fields is someone's work in progress: never retry or reload it here, whatever it says.
     try:
-        has_form = await session.page.locator("input:not([type=hidden]):visible, select:visible, textarea:visible").count() > 0
+        # count() has no timeout of its own; an unresponsive tab must reach the bounded observation instead.
+        has_form = await asyncio.wait_for(
+            session.page.locator("input:not([type=hidden]):visible, select:visible, textarea:visible").count(), 3) > 0
     except Exception:
         has_form = True
     if temporary_failure(text) and not has_form:

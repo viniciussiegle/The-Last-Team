@@ -425,6 +425,59 @@ class ObservedActions(unittest.IsolatedAsyncioTestCase):
 
         self.assertLess(time.monotonic() - started, 12)
 
+    async def test_replacement_tab_is_not_treated_as_a_website_popup(self):
+        self.context.on("page", self.session.on_page)  # as BrowserSession.connect registers it
+        self.session.last_good_url = (
+            "data:text/html,<button onclick=\"document.body.dataset.answer=confirm('Synthetic question')\">Ask</button>")
+
+        await abandon(self.session)
+        await self.session.page.wait_for_timeout(300)  # time for any wrongly scheduled popup capture to run
+        await self.session.page.locator("button").click()
+        snapshot = await observe(self.session)
+
+        self.assertEqual(self.session.dialogs, ["Synthetic question"])
+        self.assertNotIn("Popup:", snapshot.text)
+        self.assertEqual(await self.session.page.locator("body").get_attribute("data-answer"), "false")
+
+    async def test_website_popup_is_still_captured(self):
+        self.context.on("page", self.session.on_page)
+        # A served address: page scripts are not allowed to open data: addresses as top-level tabs.
+        await self.context.route("https://synthetic.example.test/**", lambda route: route.fulfill(
+            status=200, content_type="text/html",
+            body="<p>synthetic popup text</p>" if route.request.url.endswith("/popup") else
+                 '<button onclick="window.open(\'/popup\')">Open</button>'))
+        await self.page.goto("https://synthetic.example.test/opener")
+
+        await self.page.locator("button").click()
+        for _ in range(30):
+            if any(notice.startswith("Popup") for notice in self.session.notices):
+                break
+            await self.page.wait_for_timeout(100)
+        snapshot = await observe(self.session)
+
+        self.assertEqual(len(self.context.pages), 2)
+        self.assertIn("Popup: synthetic popup text", snapshot.text)
+
+    async def test_entry_site_is_retried_on_a_fresh_tab_when_a_load_gets_no_answer(self):
+        attempts = []
+
+        async def unanswered_once(route):
+            attempts.append(route.request.url)
+            if len(attempts) == 1:
+                return  # leave the first request without any response
+            await route.fulfill(status=200, content_type="text/html", body="<p>synthetic entry page</p>")
+        await self.context.route("https://synthetic.example.test/**", unanswered_once)
+        first_tab = self.session.page
+        started = time.monotonic()
+
+        await self.session.open_entry(attempts=3, limit_ms=1500)
+        snapshot = await observe(self.session)
+
+        self.assertEqual(len(attempts), 2)
+        self.assertLess(time.monotonic() - started, 12)
+        self.assertIsNot(self.session.page, first_tab)
+        self.assertIn("synthetic entry page", snapshot.text)
+
     async def test_unresponsive_tab_is_replaced_by_a_working_one(self):
         await self.page.set_content('<p>synthetic busy page</p>')
         await self.page.evaluate("setTimeout(() => { for (;;) {} }, 50)")

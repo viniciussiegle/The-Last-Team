@@ -5,9 +5,24 @@ from __future__ import annotations
 import json
 import os
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Mapping
+
+# Published simulated prices of the default hosted model, USD per million tokens.
+QWEN_PRICES = {"input": 0.15, "cached": 0.016, "output": 0.47}
+
+
+def _json_object(raw: str | None, name: str) -> dict:
+    if not raw:
+        return {}
+    try:
+        decoded = json.loads(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must contain a JSON object") from exc
+    if not isinstance(decoded, dict):
+        raise ValueError(f"{name} must contain a JSON object")
+    return decoded
 
 
 def _checkout_root() -> Path:
@@ -34,9 +49,16 @@ class Settings:
     submit_margin_s: int = 600
     max_steps: int = 70
     run_budget_s: int = 2100
-    qwen_model: str = "qwen3.8-flash-next"
-    frontier_enabled: bool = False
-    frontier_model: str | None = None
+    # The model is chosen by configuration alone; any OpenAI-compatible endpoint behind the run proxy fits.
+    model_name: str = "qwen3.8-flash-next"
+    model_base_url_env: str = "QWEN_BASE_URL"
+    model_api_key_env: str = "QWEN_API_KEY"
+    model_extra_body: dict = field(default_factory=dict)
+    model_prices: dict = field(default_factory=lambda: dict(QWEN_PRICES))
+    model_concurrency: int = 8
+    model_call_timeout_s: int = 90
+    model_first_call_timeout_s: int = 360
+    model_retries: int = 2
     surcharge_includes_setup: bool = True
     rules_stage: str = "core"
 
@@ -62,9 +84,9 @@ class Settings:
         if not urls and source.get("CDP_URL"):
             urls = [source["CDP_URL"]]
 
-        enabled = str(source.get("FRONTIER_ENABLED", "false")).strip().lower() in {"1", "true", "yes", "on"}
-        if enabled:
-            raise ValueError("Frontier model use is disabled pending human approval")
+        extra_body = _json_object(source.get("MODEL_EXTRA_BODY"), "MODEL_EXTRA_BODY")
+        prices = {**QWEN_PRICES, **{key: float(value) for key, value in
+                                    _json_object(source.get("MODEL_PRICES_USD_PER_M"), "MODEL_PRICES_USD_PER_M").items()}}
         data_dir = Path(source.get("RFQ_DATA_DIR") or _default_data_dir()).expanduser().resolve()
         checkout = _checkout_root().resolve()
         if data_dir == checkout or checkout in data_dir.parents:
@@ -80,9 +102,15 @@ class Settings:
             submit_margin_s=int(source.get("SUBMIT_MARGIN_S", "600")),
             max_steps=int(source.get("MAX_STEPS", "70")),
             run_budget_s=int(source.get("RUN_BUDGET_S", "2100")),
-            qwen_model=source.get("QWEN_MODEL", "qwen3.8-flash-next"),
-            frontier_enabled=False,
-            frontier_model=None,
+            model_name=source.get("MODEL_NAME") or source.get("QWEN_MODEL", "qwen3.8-flash-next"),
+            model_base_url_env=source.get("MODEL_BASE_URL_ENV", "QWEN_BASE_URL"),
+            model_api_key_env=source.get("MODEL_API_KEY_ENV", "QWEN_API_KEY"),
+            model_extra_body=extra_body,
+            model_prices=prices,
+            model_concurrency=int(source.get("MODEL_CONCURRENCY", "8")),
+            model_call_timeout_s=int(source.get("MODEL_CALL_TIMEOUT_S", "90")),
+            model_first_call_timeout_s=int(source.get("MODEL_FIRST_CALL_TIMEOUT_S", "360")),
+            model_retries=int(source.get("MODEL_RETRIES", "2")),
             surcharge_includes_setup=str(source.get("SURCHARGE_INCLUDES_SETUP", "true")).lower() in {"1", "true", "yes"},
             rules_stage=source.get("RULES_STAGE", "core"),
         )
