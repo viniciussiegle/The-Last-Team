@@ -271,6 +271,10 @@ async def act(session, action: dict) -> str | dict:
         url = urljoin(page.url, action["url"])
         if origin(url) not in session.allowed_origins:
             raise ValueError("Navigation must stay on this run's websites")
+        entry = {site["url"].rstrip("/") for site in [session.site, *session.sites_by_origin.values()]}
+        if url.split("#")[0] not in session.seen_addresses and url.rstrip("/") not in entry:
+            raise ValueError("This address has not appeared on any page so far. Follow a link or use a form you can see; "
+                             "do not compose addresses.")
         await page.goto(url, wait_until="domcontentloaded")
     elif kind == "click":
         item, locator = element(session, action["id"])

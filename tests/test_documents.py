@@ -28,7 +28,7 @@ class SyntheticBrowser(unittest.IsolatedAsyncioTestCase):
         self.page = await self.context.new_page()
         fixture = Path(__file__).parent / "snapshot" / "portal.html"
         await self.page.goto(fixture.resolve().as_uri())
-        self.session = SimpleNamespace(page=self.page, context=self.context, nav_hashes=set(), notices=[],
+        self.session = SimpleNamespace(page=self.page, context=self.context, nav_hashes=set(), notices=[], seen_addresses=set(),
                                        elements={}, last_snapshot=None,
                                        site={"credentials": {"username": "synthetic-user", "password": "synthetic-pass"}})
 

@@ -39,6 +39,30 @@ async def consent(session):
             pass
 
 
+# An informational notice: a dialog without form fields that offers its own close control. Its more prominent
+# control may lead away from the work, so the close control is used, and only that one.
+NOTICE_JS = r"""() => {
+  const shown = e => { const r=e.getBoundingClientRect(), s=getComputedStyle(e); return r.width>0&&r.height>0&&s.visibility!=='hidden'&&s.display!=='none'; };
+  const closed = [];
+  for (const box of document.querySelectorAll('dialog[open],[role=dialog],[aria-modal=true]')) {
+    if (!shown(box) || Array.from(box.querySelectorAll('input,select,textarea')).some(shown)) continue;
+    const close = Array.from(box.querySelectorAll('button,[role=button]')).filter(shown).find(e =>
+      /^(schlie(ß|ss)en|close|dismiss|×|✕|x)$/i.test(((e.getAttribute('aria-label')||'')||e.innerText||'').trim()));
+    if (close) { closed.push((box.getAttribute('aria-label')||box.innerText||'').replace(/\s+/g,' ').trim().slice(0,80)); close.click(); }
+  }
+  return closed;
+}"""
+
+
+async def close_notices(session):
+    for frame in session.page.frames:
+        try:
+            for label in await asyncio.wait_for(frame.evaluate(NOTICE_JS), 2):
+                session.notices.append(f"An informational notice was closed: {label}")
+        except Exception:
+            pass
+
+
 async def login(session) -> str:
     """Fill a model-selected login form using generic credential field types."""
     for frame in session.page.frames:
@@ -92,6 +116,7 @@ async def recover(session, bus=None, agent=""):
             await session.page.goto(session.last_good_url or session.site["url"], wait_until="domcontentloaded")
         session.notices.append("Selected tab closed; restored a remaining working tab.")
     await consent(session)
+    await close_notices(session)
     # These are generic browser failure patterns, never site paths.
     text = ""
     try:

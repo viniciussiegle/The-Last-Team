@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+from urllib.parse import urljoin
 from dataclasses import dataclass
 
 
@@ -123,6 +124,7 @@ def option_list(options, limit=60):
 async def observe(session, max_chars: int = 26000, expanded: str = "") -> Snapshot:
     await settle(session.page)
     pieces = [f"URL {session.page.url}"]
+    session.seen_addresses.add(session.page.url.split("#")[0])
     elements = {}
     next_id = 1
     for index, frame in enumerate(session.page.frames):
@@ -149,6 +151,8 @@ async def observe(session, max_chars: int = 26000, expanded: str = "") -> Snapsh
         pieces.append("CONTROLS")
         for e in data["elements"]:
             elements[e["id"]] = {**e, "frame": frame, "frame_path": frame_path}
+            if e.get("href"):
+                session.seen_addresses.add(urljoin(frame.url, e["href"]).split("#")[0])
             details = f"[{e['id']}] {e['type']} {e['label']}"
             if e.get("value"):
                 details += f" value={e['value']}"

@@ -29,6 +29,7 @@ class BrowserSession:
     sites_by_origin: dict = field(default_factory=dict)
     last_good_urls: dict = field(default_factory=dict)
     opening_own_tab: bool = False
+    seen_addresses: set[str] = field(default_factory=set)
 
     @property
     def current_site(self):
