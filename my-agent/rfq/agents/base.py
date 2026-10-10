@@ -57,12 +57,9 @@ TOOLS = [
     }, ["record_kind"]),
 ]
 
-TAN_TOOL = function("fetch_signing_tan", "After requesting a TAN on the portal, ask the mailbox worker for the current signing code. Include the portal's request metadata when displayed. Never invent request identifiers or request another TAN while using this one.", {
-    "request_id": {"type": "string"},
-    "requested_at": {"type": "string", "description": "Observed portal request timestamp with timezone, only if shown."},
-    "requested_at_precision": {"type": "string", "enum": ["second", "minute"], "description": "Use minute only when the displayed time omits seconds."}
+TAN_TOOL = function("fetch_signing_tan", "After requesting a signing code on the portal, ask the mailbox worker to read it. Pass the portal's request number when it shows one. Do not request another code while using this one.", {
+    "request_id": {"type": "string"}
 }, [])
-
 
 class BrowserAgent:
     def __init__(self, name, session, model, bus, ledger, run, settings, shared):

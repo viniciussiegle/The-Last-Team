@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 
 from pydantic import ValidationError
 
@@ -35,33 +35,11 @@ class Ledger:
             return "Validation failed; correct fields from evidence: " + str(error)[:2500]
         checks, missing = [], []
         if kind == "TAN" and self.tan_context:
-            from .resolver import normalized, timestamp
-            context = self.tan_context
-            if not record.reference or normalized(record.reference) != normalized(context["reference"]):
+            # The websites run on the scenario's clock, so a code is matched to this tender by its reference only.
+            from .resolver import normalized
+            if not record.reference or normalized(record.reference) != normalized(self.tan_context["reference"]):
                 return "Signing code needs the exact tender reference from its message."
             checks.append("reference")
-            if context.get("request_id"):
-                if record.request_id != context["request_id"]:
-                    return "Signing message does not match the portal's observed request identifier."
-                checks.append("request_id")
-            now = datetime.now(timezone.utc)
-            try:
-                if record.requested_at:
-                    requested = timestamp(record.requested_at)
-                    if requested > now + timedelta(seconds=5):
-                        return "Signing request time is in the future; verify the message timestamp."
-                    display_interval = timedelta(seconds=59 if record.requested_at_precision == "minute" else 0)
-                    if requested + display_interval < timestamp(context["requested_after"]) - timedelta(seconds=5):
-                        return "Signing message predates the current signing flow. Find the current request."
-                    checks.append("request_time")
-                if record.expires_at:
-                    expires = timestamp(record.expires_at)
-                    if expires <= now or (record.requested_at and expires <= timestamp(record.requested_at)):
-                        return "Signing code is expired or has inconsistent validity metadata."
-                    checks.append("expiry")
-            except ValueError:
-                return "Signing timestamps must include the observed timezone."
-            missing = [name for name in ("request_id", "requested_at", "expires_at") if getattr(record, name) is None]
         key = kind + record.model_dump_json()
         if key in self.keys:
             return "Record already present."

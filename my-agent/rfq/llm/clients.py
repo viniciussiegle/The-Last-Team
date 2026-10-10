@@ -88,7 +88,7 @@ class ModelClient:
 
         stream = await asyncio.wait_for(self.client.chat.completions.create(
             **kwargs, stream=True, stream_options={"include_usage": True}), remaining(first_by))
-        content, calls, usage, finish, started = [], {}, {}, None, False
+        content, calls, usage, finish, started, first_chunk = [], {}, {}, None, False, None
         try:
             chunks = stream.__aiter__()
             while True:
@@ -97,6 +97,8 @@ class ModelClient:
                     chunk = await asyncio.wait_for(chunks.__anext__(), remaining(until))
                 except StopAsyncIteration:
                     break
+                if not started:
+                    first_chunk = round(time.monotonic() - began, 2)
                 started = True
                 if chunk.usage:
                     usage = chunk.usage.model_dump()
@@ -119,7 +121,7 @@ class ModelClient:
             "tool_calls": [{"id": call["id"] or f"call_{index}", "type": "function",
                             "function": {"name": call["name"], "arguments": call["arguments"]}}
                            for index, call in sorted(calls.items())] or None})
-        return message, usage, finish
+        return message, {**usage, "first_chunk_s": first_chunk}, finish
 
     def account(self, agent, counts, finish, started):
         """Price one answered call, cut off or not."""
@@ -131,7 +133,8 @@ class ModelClient:
         self.total_cost += cost
         self.bus.emit("model_call", agent, {"model": self.model, "tokens_in": inputs, "tokens_cached": cached,
                                              "tokens_out": outputs, "tokens_reasoning": reasoning, "cost": cost,
-                                             "finish": finish, "latency": round(time.monotonic() - started, 3)})
+                                             "finish": finish, "first_chunk": counts.get("first_chunk_s"),
+                                             "latency": round(time.monotonic() - started, 3)})
 
 
 QwenClient = ModelClient  # name used by development scripts
