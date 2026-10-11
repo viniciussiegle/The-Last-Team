@@ -11,8 +11,9 @@ import io
 import re
 import time
 import zipfile
+from collections import Counter
 from dataclasses import dataclass, field
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urlencode, urljoin, urlparse
 
 OBSERVE_JS = r"""(start) => {
   const BLOCK = new Set(['ADDRESS','ARTICLE','ASIDE','BLOCKQUOTE','BR','DD','DETAILS','DIALOG','DIV','DL','DT','FIELDSET',
@@ -167,6 +168,17 @@ OBSERVE_JS = r"""(start) => {
 
 GRACE = 0.15  # seconds an action gets to start a navigation or request before the page counts as unchanged
 
+# What a browser would send for the form of a field: method, address and the successful controls with their values.
+FORM_JS = """e => { const f = e.form; if (!f) return null;
+  const fields = [];
+  for (const el of f.elements) {
+    if (!el.name || el.disabled || ['submit', 'button', 'image', 'reset', 'file'].includes(el.type)) continue;
+    if ((el.type === 'checkbox' || el.type === 'radio') && !el.checked) continue;
+    fields.push([el.name, el.value]);
+  }
+  return { method: (f.getAttribute('method') || 'get').toLowerCase(), name: e.name || '', fields,
+           action: new URL(f.getAttribute('action') || '', location.href).href }; }"""
+
 OPEN_DETAILS_JS = """e => { for (let d = e.closest('details'); d; d = d.parentElement && d.parentElement.closest('details')) d.open = true;
   e.scrollIntoView({block: 'center'}); }"""
 
@@ -187,10 +199,15 @@ class Control:
     context: str = ""  # the text line the control sits in, for choosing among look-alike controls
 
     @property
-    def fillable(self) -> bool:
-        return not self.disabled and not self.readonly and self.kind in (
+    def entry(self) -> bool:
+        """A control that takes a value, whether or not it can be used right now."""
+        return self.kind in (
             "input", "search", "email", "number", "tel", "password", "textarea", "textbox", "searchbox", "select",
             "range", "checkbox", "radio", "date", "datetime-local", "combobox", "slider", "switch")
+
+    @property
+    def fillable(self) -> bool:
+        return self.entry and not self.disabled and not self.readonly
 
     def describe(self) -> str:
         text = f"{self.kind} '{self.label}'{self.extra}"
@@ -519,35 +536,100 @@ class Tab:
             return "signed in with the run credentials"
         raise ValueError("no login form on this page")
 
-    async def read_pages(self, urls: list[str], limit: int = 12000) -> list[tuple[str, str]]:
-        """Open model-selected pages of this website in parallel tabs (same session) and return their text."""
-        async def read(url: str) -> tuple[str, str]:
-            page = await self.context.new_page()
+    async def read_pages(self, urls: list[str], follow: list[str] | None = None, depth: int = 1,
+                         limit: int = 12000, budget: int = 60) -> list[tuple[str, str]]:
+        """Open model-selected pages of this website in parallel tabs (same session) and return their text.
+
+        `follow` names links by their text: on every page opened, the links with one of those names are opened as
+        well, down to `depth` levels below the selected pages. The model chooses the pages and the names. When
+        names were given, a last entry lists the link names seen on the opened pages that were not opened."""
+        wanted = [normalize(name) for name in follow or [] if normalize(name)]
+        semaphore = asyncio.Semaphore(8)
+        seen: set[str] = set()
+        results: list[tuple[tuple, str, str]] = []
+        unopened: Counter = Counter()
+
+        async def read(url: str, order: tuple, via: str):
             try:
                 target = self.resolve(url)
-                for attempt in range(3):
-                    response = await page.goto(target, wait_until="domcontentloaded", timeout=15000)
-                    try:  # frames inside the page finish loading with its load event
-                        await page.wait_for_load_state("load", timeout=4000)
-                    except Exception:
-                        pass
-                    if not response or response.status < 500:
-                        break
-                    await asyncio.sleep(0.3)
-                obs = await asyncio.wait_for(self._render(page), 20)
-                if obs.password:
-                    return url, "[session expired: this page shows a login form; sign in on the main page, then read again]"
-                return url, obs.clip(limit)
-            except Exception as error:
-                return url, f"[could not read: {type(error).__name__}: {str(error)[:200]}]"
-            finally:
-                await page.close()
-        semaphore = asyncio.Semaphore(8)
-
-        async def bounded(url):
+            except ValueError as error:
+                results.append((order, url, f"[could not read: {error}]"))
+                return
+            if target.split("#")[0] in seen or len(seen) >= budget:
+                return
+            seen.add(target.split("#")[0])
+            name = url + (f"  (opened by '{via}')" if via else "")
             async with semaphore:
-                return await read(url)
-        return await asyncio.gather(*(bounded(url) for url in urls[:24]))
+                page = await self.context.new_page()
+                try:
+                    for attempt in range(3):
+                        response = await page.goto(target, wait_until="domcontentloaded", timeout=15000)
+                        try:  # frames inside the page finish loading with its load event
+                            await page.wait_for_load_state("load", timeout=4000)
+                        except Exception:
+                            pass
+                        if not response or response.status < 500:
+                            break
+                        await asyncio.sleep(0.3)
+                    obs = await asyncio.wait_for(self._render(page), 20)
+                except Exception as error:
+                    results.append((order, name, f"[could not read: {type(error).__name__}: {str(error)[:200]}]"))
+                    return
+                finally:
+                    await page.close()
+            if obs.password:
+                results.append((order, name, "[not read: this page shows a login form (the session expired); sign in "
+                                             "on the main page, then read it again]"))
+                return
+            if response and response.status >= 500:
+                results.append((order, name, f"[not read: the server answered with error {response.status} three "
+                                             "times; read it again]"))
+                return
+            results.append((order, name, obs.clip(limit)))
+            below = []
+            for control in obs.controls.values():
+                label = normalize(control.label)
+                if not control.href or not label or urlparse(control.href).netloc != self.host:
+                    continue
+                if len(order) <= depth and any(want == label or (len(want) > 3 and want in label) for want in wanted):
+                    below.append((control.href, control.label))
+                else:
+                    unopened[control.label] += 1
+            await asyncio.gather(*(read(href, order + (index,), label) for index, (href, label) in enumerate(below)))
+
+        await asyncio.gather(*(read(url, (index,), "") for index, url in enumerate(urls[:budget])))
+        pages = [(name, text) for _, name, text in sorted(results, key=lambda item: item[0])]
+        if wanted and unopened:
+            names = " | ".join(f"{label} ×{count}" if count > 1 else label for label, count in unopened.most_common(30))
+            pages.append(("(links on these pages that were not opened)", names[:1500]))
+        return pages
+
+    async def search(self, cid: int, queries: list[str]) -> list[tuple[str, str]]:
+        """Run several model-chosen searches of one search field and return each result page.
+
+        A form that submits with GET is the address of its result page: its own fields plus the query, exactly
+        as the browser sends them, so all queries are read in parallel tabs. Any other form is filled and
+        submitted on the main page, one query after the other."""
+        control, locator = self._locate(cid)
+        queries = [query for query in dict.fromkeys(str(q).strip() for q in queries) if query][:16]
+        form = await locator.evaluate(FORM_JS, timeout=3000)
+        if form and form["method"] == "get" and form["name"]:
+            base = form["action"].split("#")[0].split("?")[0]
+            urls = [base + "?" + urlencode([(name, query if name == form["name"] else value)
+                                            for name, value in form["fields"]]) for query in queries]
+            pages = await self.read_pages(urls)
+            return [(f'search "{query}": {name}', text) for query, (name, text) in zip(queries, pages)]
+        pages = []
+        for query in queries:
+            await self.fill(cid, query)
+            await self.press("Enter", cid)
+            obs = await self.observe()
+            pages.append((f'search "{query}": {obs.url}', obs.clip(12000)))
+            same = [c for c in obs.controls.values() if (c.kind, c.label) == (control.kind, control.label)]
+            if not same:
+                break
+            cid = same[0].id
+        return pages
 
     async def paginate(self, cid: int, max_pages: int = 8, limit: int = 30000) -> str:
         """Follow the model-chosen 'next page' / 'load more' control through a result set; new lines of each page."""

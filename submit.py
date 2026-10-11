@@ -162,18 +162,27 @@ class Submitter:
             found = in_headings
         elif len(found) > 1 and asked in self.asked_positions:
             found = [self.asked_positions[asked]]
-        questions = {}
-        if layout not in self.layouts:
-            questions["page"] = llm.choice("What is this page?", PAGE)
+        questions, known = {}, 0
         for control in obs.controls.values():
             key = (control.kind, control.label)
             if len(questions) >= 60:
                 break
-            if control.kind in ("button", "submit", "reset") and key not in self.purposes:
-                questions[f"b{control.id}"] = llm.choice(f"What does the button {control.describe()[:200]} do?", PURPOSES)
-            elif control.fillable and key not in self.fields:
-                questions[f"f{control.id}"] = llm.choice(
-                    f"Which bid field does the control {control.describe()[:220]} hold?", FIELDS)
+            if control.kind in ("button", "submit", "reset"):
+                known += key in self.purposes
+                if key not in self.purposes:
+                    questions[f"b{control.id}"] = llm.choice(f"What does the button {control.describe()[:200]} do?", PURPOSES)
+            elif control.entry:  # also fields that are disabled for now: they are the same fields once enabled
+                known += key in self.fields
+                if key not in self.fields:
+                    questions[f"f{control.id}"] = llm.choice(
+                        f"Which bid field does the control {control.describe()[:220]} hold?", FIELDS)
+        if layout not in self.layouts:
+            same_address = [kind for other, kind in self.layouts.items() if other.split("|")[0] == layout.split("|")[0]]
+            if known and not questions and same_address:
+                # the same address showing only controls already understood: the same kind of page as before
+                self.layouts[layout] = same_address[-1]
+            else:
+                questions["page"] = llm.choice("What is this page?", PAGE)
         if len(found) > 1:
             questions["position"] = llm.choice("Which tender position does this form page configure and price?",
                                                {p: f"tender position {p}" for p in found})
@@ -385,20 +394,27 @@ class Submitter:
                 break
 
     async def fetch_tan(self, obs: Observation, until: float) -> str | None:
-        """The mail worker opens the newest TAN message for this tender and reports the code as a note."""
+        """The mail worker reads the signing TAN that was just requested and reports the code.
+
+        It starts from a fresh copy of the mailbox's first page, read in a tab of its own: the newest message is
+        there, and nothing has to be searched or unlocked on the way."""
         if not self.mail:
             return None
-        request = re.findall(r"(?:Anforderung|request)\D{0,5}(\d+)", obs.text, re.I)
-        goal = (f"Read the newest signing TAN message for {self.answer['tender_reference']}"
-                + (f" (request {request[-1]})" if request else "")
-                + " (new TAN messages appear at the top of the inbox without a search; open its message URL with "
-                  "read) and return the code in the reply field 'tan'. Older TAN messages are invalid.")
+        goal = (f"A signing TAN for {self.answer['tender_reference']} was requested a moment ago (request number "
+                f"{self.tan_requests} of this run) and arrives as a new message. You are given the mailbox as it is "
+                "now: open that newest TAN message as its own page with read and return its code in the reply field "
+                "'tan'. TAN messages of earlier requests are invalid. If the new message is not listed yet, read "
+                "the mailbox address again.")
         self.mail.result.pop("tan", None)
         self.mail.assign([goal], fresh=True)
-        worker = asyncio.create_task(self.mail.run(min(until, llm.clock() + 90), max_steps=self.mail.steps + 25))
+        try:
+            self.mail.pending = list(await self.mail.tab.read_pages([self.mail.site["url"]]))
+        except Exception as error:
+            self.log(f"[submit] mailbox not readable: {type(error).__name__}")
+        worker = asyncio.create_task(self.mail.run(min(until, llm.clock() + 60), max_steps=self.mail.steps + 10))
         try:
             while not worker.done() and not self.mail.result.get("tan"):
-                await asyncio.sleep(0.3)
+                await asyncio.sleep(0.1)
             return self.mail.result.get("tan")
         finally:
             worker.cancel()

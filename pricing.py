@@ -16,8 +16,9 @@ from decimal import Decimal, ROUND_HALF_UP, ROUND_FLOOR, InvalidOperation
 CENT = Decimal("0.01")
 
 RECORD_GUIDE = """Record kinds and their data fields. Report values exactly as observed. Dates: full ISO 8601 timestamps
-including the time (convert the page's time zone to UTC when it is stated). Numbers: strings copied as shown,
-keeping a locale hint such as "1.234,5 (de-DE)" when the page gives one or when separators are ambiguous.
+including the time (convert the page's time zone to UTC when it is stated). Numbers: strings copied character for
+character as shown. Keep a locale hint such as "1.234,5 (de-DE)" only when the page prints it next to that number;
+never add, change or guess a hint.
 When one message or table lists several keys, rates, tariffs or bands, include ALL of them, not only the ones
 you think apply. Leave a field out rather than guessing it; use null only for a value proven absent.
 Value fields contain only the value (and its locale hint); put any explanation in a separate note field.
@@ -102,13 +103,15 @@ def number(value, number_format: str | None = None, kind: str | None = None) -> 
     if not re.search(r"\d", text):
         return None
     fmt = (number_format or "").lower()
+    if fmt and not written_as(text, fmt):
+        fmt = ""  # a locale applies only to a number written the way that locale writes numbers
     if not fmt and kind in (COUNT, AMOUNT):
         grouped = re.fullmatch(r"\d{1,3}(?:([.,])\d{3})(?:\1\d{3})*", text)
         if grouped and (kind == COUNT or grouped.group(1) == "."):
             return Decimal(text.replace(".", "").replace(",", ""))
-    if fmt.startswith(("de", "fr", "es", "it", "nl", "pt", "pl", "cs", "da", "sv", "fi", "nb")):
+    if fmt.startswith(COMMA_DECIMAL):
         text = text.replace(".", "").replace(",", ".")
-    elif fmt.startswith(("en", "ja", "zh", "ko")):
+    elif fmt.startswith(POINT_DECIMAL):
         text = text.replace(",", "")
     elif "," in text and "." in text:
         text = text.replace(".", "").replace(",", ".") if text.rfind(",") > text.rfind(".") else text.replace(",", "")
@@ -118,6 +121,21 @@ def number(value, number_format: str | None = None, kind: str | None = None) -> 
         return Decimal(text)
     except InvalidOperation:
         return None
+
+
+COMMA_DECIMAL = ("de", "fr", "es", "it", "nl", "pt", "pl", "cs", "da", "sv", "fi", "nb")
+POINT_DECIMAL = ("en", "ja", "zh", "ko")
+
+
+def written_as(token: str, fmt: str) -> bool:
+    """Whether a number is written the way a locale writes it: groups of exactly three digits, one decimal mark.
+
+    '1.0873' is not a German number (a point groups thousands there, and a group has three digits), so a German
+    hint on it is a mistake and must not turn it into 10873."""
+    group, decimal = (r"\.", ",") if fmt.startswith(COMMA_DECIMAL) else (",", r"\.") if fmt.startswith(POINT_DECIMAL) else ("", "")
+    if not group:
+        return True
+    return bool(re.fullmatch(rf"-?(?:\d{{1,3}}(?:{group}\d{{3}})+|\d+)(?:{decimal}\d+)?", token))
 
 
 def when(value) -> datetime | None:
