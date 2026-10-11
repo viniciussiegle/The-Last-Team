@@ -11,6 +11,7 @@ messages), and the mail worker fetches the signing TAN.
 import asyncio
 import json
 import re
+from collections import Counter
 from decimal import Decimal
 
 import llm
@@ -96,6 +97,7 @@ class Submitter:
         self.gave_up = False                   # the form gives no way forward: stop trying
         self.tan_requested = False
         self.tan_requests = 0
+        self.repairs = Counter()  # repairs tried per position page
 
     def set_bid(self, bid: dict, emails: list[str]):
         """The master's decided bid: the submitter continues past the pages that need it."""
@@ -357,7 +359,20 @@ class Submitter:
                 close = await self.choose(obs, "close the dialog that covers the form, without following its links", covering)
             self.log(f"[submit] overlay: {await tab.click(close)}")
             return False
+        if position and position not in self.positions and self.button(obs, "omit") and repeats < 2:
+            self.log(f"[submit] omit {position}: {await tab.click(self.button(obs, 'omit').id, strict=True)}")
+            return False
         if repeats >= 2:
+            if position in self.positions and self.repairs[position] and self.button(obs, "omit"):
+                # The page refused this position's values and one repair did not help (a required field the bid
+                # has no value for): leave the position out rather than lose the whole bid on it.
+                entry = self.positions.pop(position)
+                self.answer["total_net"] = round(sum(p["quantity"] * p["unit_price"] for p in self.positions.values()), 2)
+                self.log(f"[submit] position {position} is not accepted by the form ({sorted(entry)}); leaving it out, "
+                         f"total now {self.answer['total_net']}")
+                self.log(f"[submit] omit {position}: {await tab.click(self.button(obs, 'omit').id, strict=True)}")
+                return False
+            self.repairs[position or obs.url] += 1
             await self.repair(obs, position)
             return False
         if kind in ("obstacle", "start"):
@@ -368,9 +383,6 @@ class Submitter:
             self.log(f"[submit] {kind}: {await tab.click(target)}")
             return False
         values = self.values_for(position)
-        if position and position not in self.positions and self.button(obs, "omit"):
-            self.log(f"[submit] omit {position}: {await tab.click(self.button(obs, 'omit').id, strict=True)}")
-            return False
         if await self.fill_selects(obs, values):
             return False
         await self.fill_inputs(obs, values)  # same pass: nothing reloaded, so the controls are as observed
