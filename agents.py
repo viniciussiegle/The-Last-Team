@@ -109,7 +109,9 @@ Name cross-site dependencies (e.g. the ERP search needs the catalog groups from 
 worker also notes the bidder's own address and mail domain; it first lists every message for the exact reference
 in every folder (inbox and archive), with the reference as the only search word and all result pages, and then
 reads the latest authorised message of each topic. Nobody may open or fill the bid submission form now, nor request a signing TAN; the master submits at
-the end. Registering participation is allowed when documents need it."""
+the end. Registering participation is allowed when documents need it. Give no goal about submission requirements,
+submission instructions or acknowledgments: the form shows them when it is filled at the end, and looking for them
+now leads a worker into the form."""
 
 REVIEW = """
 You are the master. The workers finished; below are their records and the calculator's draft bid, computed
@@ -422,7 +424,8 @@ class Worker:
             "stuck": "You are going in circles (see RECENT STEPS): the same page keeps coming back. What it shows is "
                      "the result of what you did: a result count, 'nothing found' or a notice is an answer. Give this "
                      "subgoal's approach up and do something different now: another exact search key, another folder "
-                     "or list, read the needed URLs directly, or the next goal; done only when nothing else is open.",
+                     "or list, read the needed URLs directly, the start page again (goto) if this page is empty or "
+                     "broken, or the next goal; done only when nothing else is open.",
         }[mode]
         focused = self.focused
         user = "\n\n".join(part for part in [
@@ -488,9 +491,10 @@ class Worker:
             self.acted[(obs.signature, acting)] += 1
             if self.acted[(obs.signature, acting)] > 2:
                 self.note("refused: exactly these actions were carried out twice on exactly this page and it came "
-                          "back the same, so they do not work here. What the page shows is their result (a result "
-                          "count, 'nothing found' or a notice is an answer). Do something else: another exact search "
-                          "key, another folder or list, read link targets directly, or the next goal")
+                          "back the same, so they do not work here. What the page shows is their result. Do "
+                          "something else: other controls, read link targets directly, open the start page again "
+                          "(goto) if this page is empty or broken, or the next goal")
+                self.log(f"[{self.name}] the page: {obs.url} | {obs.text[:400]!r}")
                 return
         await self.execute(actions)
 
