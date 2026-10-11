@@ -121,29 +121,14 @@ async def solve(task: dict, page) -> dict | None:
     workers = {site["siteId"]: Worker(site, tabs[site["siteId"]], board, system, log) for site in task["access"]}
     master = Master(system, sites, log)
 
-    # Phase 1: the master plans while the workers sign in (obstacles need no plan).
-    running = [asyncio.create_task(worker.run(research_end)) for worker in workers.values()]
-    helpers: list[Worker] = []
-
-    async def spawn(parent: Worker, goal: str) -> str:
-        """A worker delegates an independent part of its goals to a helper in a new tab of its session."""
-        mine = [helper for helper in helpers if helper.id == parent.id]
-        if len(mine) >= 2 or len(goal) < 15 or research_end - llm.clock() < 60:
-            return "no helper available: do it yourself"
-        tab = Tab(parent.site, parent.tab.context, await parent.tab.context.new_page(), log)
-        helper = Worker(parent.site, tab, board, system, log, name=f"{parent.id}#{len(mine) + 1}")
-        helper.assign([goal])
-        helper.history.append(f"started by the {parent.id} worker, which continues with the other parts")
-        helpers.append(helper)
-        await tab.goto(parent.tab.page.url)
-        running.append(asyncio.create_task(helper.run(research_end, max_steps=30)))
-        return f"helper {helper.name} started: {goal[:120]}"
-
+    # Phase 1: the workers start at once with the brief and a standing goal; the master's plan refines their goals
+    # when it arrives, without interrupting them.
     for worker in workers.values():
-        worker.spawn = spawn
+        worker.assign([agents.STANDING_GOAL])
+    running = [asyncio.create_task(worker.run(research_end)) for worker in workers.values()]
     plan = await master.make_plan()
     for site_id, worker in workers.items():
-        worker.assign(plan["goals"].get(site_id, []) + [f"share early: {item}" for item in plan["share"].get(site_id, [])][:2])
+        worker.refine(plan["goals"].get(site_id, []) + [f"share early: {item}" for item in plan["share"].get(site_id, [])][:2])
     log(f"{llm.stamp()} [master] plan ready")
 
     portal = submission_site(task) if task["submission"].get("kind") == "site" else None
@@ -171,16 +156,17 @@ async def solve(task: dict, page) -> dict | None:
         if portal in jobs and not submitting and jobs[portal].done():
             start_submission()
         draft = bid_from(board, plan, brief)
+        board.gaps = draft["gaps"]  # every worker sees what the bid still lacks
         essential = [jobs[site] for site in (portal, mail_site) if site in jobs]
         if complete(draft) and all(job.done() for job in essential):
             complete_since = complete_since or llm.clock()
-            if llm.clock() - complete_since >= 8:  # a short grace for records still on their way
+            if llm.clock() - complete_since >= 3:  # a short grace for records still on their way
                 log(f"{llm.stamp()} [master] evidence complete; stopping the remaining workers")
                 break
         else:
             complete_since = None
         changed = asyncio.ensure_future(board.changed.wait())
-        await asyncio.wait(active + [changed], timeout=min(10, max(1, research_end - llm.clock())),
+        await asyncio.wait(active + [changed], timeout=min(3, max(1, research_end - llm.clock())),
                            return_when=asyncio.FIRST_COMPLETED)
         changed.cancel()
         for job in active:
@@ -191,21 +177,26 @@ async def solve(task: dict, page) -> dict | None:
     await asyncio.wait(running, timeout=5)  # let cancelled workers unwind before anyone reuses their tabs
     log(f"{llm.stamp()} [master] research finished; {len(board.evidence.records)} records; {llm.USAGE}")
 
-    # Phase 3: decide the bid; a review and one round of follow-ups only while gaps remain and time allows.
+    # Phase 3: decide the bid. While the calculator still misses facts, every worker gets the open gaps for one
+    # more round (the calculator, not a model's judgement, says what is missing) and the master reviews the
+    # records in the meantime.
     bid = bid_from(board, plan, brief)
     review = {}
     if bid["gaps"] or not bid["answer"]["positions"]:
-        review = await master.review(board, bid)
+        board.gaps = bid["gaps"]
+        reviewing = asyncio.create_task(master.review(board, bid))
+        if bid["gaps"] and end - llm.clock() > 7 * 60:
+            log(f"{llm.stamp()} [master] open gaps go to every worker: " + "; ".join(bid["gaps"])[:600])
+            until = min(llm.clock() + 100, end - 6 * 60)
+            goal = ("The calculator still misses the facts below. Find and record the ones this website holds, "
+                    "reading only what they need; if none of them can be on this website, set done at once.\n"
+                    + "\n".join(f"- {gap}" for gap in bid["gaps"][:30]))
+            for worker in workers.values():
+                worker.assign([goal])
+            await asyncio.gather(*(worker.run(until, max_steps=worker.steps + 10) for worker in workers.values()))
+        review = await reviewing
         board.add("master", review.get("records") or [], [])
         bid = bid_from(board, plan, brief)
-        followups = {site: goal for site, goal in (review.get("followups") or {}).items() if site in workers and goal}
-        if followups and bid["gaps"] and end - llm.clock() > 7 * 60:
-            log(f"{llm.stamp()} [master] follow-ups: {followups}")
-            until = min(llm.clock() + 120, end - 6 * 60)
-            for site, goal in followups.items():
-                workers[site].assign([str(goal)])
-            await asyncio.gather(*(workers[site].run(until, max_steps=workers[site].steps + 15) for site in followups))
-            bid = bid_from(board, plan, brief)
     log(f"{llm.stamp()} [master] bid: " + json.dumps(bid["answer"], ensure_ascii=False))
     log(f"{llm.stamp()} [master] gaps: " + ("; ".join(bid["gaps"]) or "none") + f" | {review.get('comment', '')}")
 

@@ -138,6 +138,63 @@ def written_as(token: str, fmt: str) -> bool:
     return bool(re.fullmatch(rf"-?(?:\d{{1,3}}(?:{group}\d{{3}})+|\d+)(?:{decimal}\d+)?", token))
 
 
+FREE_TEXT = {"reason", "note", "notes", "short_text", "comment", "summary"}
+
+
+def squash(text) -> str:
+    """Text without spaces and invisible characters, case folded: how a copied value is looked up on a page."""
+    return re.sub(r"[\s  ​-‏⁠﻿]", "", str(text)).casefold()
+
+
+def check_copied(data, shown: str, path: str = "") -> list[str]:
+    """Every identifier and number of a record must stand on a page its worker was shown.
+
+    `shown` is the squashed text of those pages. A number with separators must stand there exactly as recorded,
+    because its separators decide its value; a locale hint that does not stand next to its number is removed
+    (it was added, not read); an identifier must stand there whole. Dates are converted by the worker and free
+    text is its own wording, so neither is checked. Returns the problems; `data` loses unread hints."""
+    plain = None
+    problems = []
+
+    def copied(value: str) -> str | None:
+        nonlocal plain
+        text = value.strip()
+        if not re.search(r"\d", text) or len(text) > 60 or (when(text) is not None and re.search(r"\d{4}", text)):
+            return value
+        if squash(text) in shown:
+            return value
+        hint = re.search(r"\s*\(?\b[a-z]{2}-[A-Z]{2}\b\)?\s*$", text)
+        base = text[:hint.start()].strip() if hint else text
+        if hint and squash(base) in shown:
+            return base
+        token = re.search(r"-?\d(?:[\d.,'  ]*\d)?", base)
+        if re.match(r"[^\W\d_]{1,8}[-_/. ]?\d", base) or not token:
+            return None  # an identifier that stands on no page
+        digits = re.sub(r"[  ]", "", token.group(0))
+        if re.search(r"[.,']", digits):
+            return base if squash(digits) in shown else None
+        if plain is None:
+            plain = re.sub(r"[.,']", "", shown)
+        return base if digits.lstrip("-") in plain else None
+
+    def walk(node, where):
+        entries = node.items() if isinstance(node, dict) else enumerate(node)
+        for key, value in list(entries):
+            if isinstance(value, (dict, list)):
+                walk(value, f"{where}{key}." if isinstance(node, dict) else where)
+            elif isinstance(value, str) and key not in FREE_TEXT:
+                result = copied(value)
+                if result is None:
+                    problems.append(f"{where}{key}={value!r} stands on no page you were given: copy it character for "
+                                    "character from the page, or leave the field out")
+                elif result != value:
+                    node[key] = result
+
+    if isinstance(data, (dict, list)):
+        walk(data, path)
+    return problems
+
+
 def when(value) -> datetime | None:
     """Parse ISO or German dates; a date without time is the start of that day (UTC)."""
     if not value:
