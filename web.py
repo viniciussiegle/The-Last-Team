@@ -565,7 +565,7 @@ class Tab:
 
     async def goto(self, url: str) -> str:
         target = self.resolve(url)
-        await self.page.goto(target, wait_until="domcontentloaded", timeout=15000)
+        await self.page.goto(target, wait_until="domcontentloaded", timeout=30000)
         await self.settle()
         return f"opened {target}"
 

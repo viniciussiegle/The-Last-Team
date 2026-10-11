@@ -235,6 +235,7 @@ class Worker:
         self.timeouts = 0
         self.read_cache: dict[str, str] = {}  # url -> text of pages read in parallel tabs
         self.paths: dict[str, str] = {}       # address paths this website has shown -> one example of each
+        self.paths[urlparse(site["url"]).path.rstrip("/") or "/"] = "/"  # the run names the entry address itself
         self.shown = ""                       # squashed text of every page the model was shown, to check what it copies
         self.brief_text = pricing.squash(system)
         self.result: dict = {}
@@ -290,12 +291,14 @@ class Worker:
 
     # ------------------------------------------------------------------ loop
     async def run(self, until: float, max_steps: int = 45):
-        if self.tab.page.url in ("", "about:blank"):
-            try:
-                await self.tab.goto(self.site["url"])
-            except Exception as error:
-                self.note(f"opening the website failed: {type(error).__name__}: {str(error)[:160]}")
         while not self.done and llm.clock() < until and self.steps < max_steps:
+            if not self.tab.page.is_closed() and not self.tab.page.url.startswith("http"):
+                try:  # nothing loaded yet (a slow or failed first load): open the entry address, no model turn
+                    await self.tab.goto(self.site["url"])
+                except Exception as error:
+                    self.log(f"[{self.name}] opening the website failed: {type(error).__name__}: {str(error)[:120]}")
+                    await asyncio.sleep(1)
+                    continue
             self.steps += 1
             try:
                 await asyncio.wait_for(self.step(until), timeout=min(STEP_LIMIT, max(10.0, until - llm.clock() + 5)))
