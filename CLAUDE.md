@@ -49,10 +49,11 @@ Claude Code). Interfaces are in ARCHITECTURE.md, status in PROGRESS.md.
   It goes into the final run until a later submission passes review. Do not
   propose replacing it unless a candidate beats it over several test runs
   (earlier commits managed about two runs in three).
-- GitHub (human, 2026-10-11): `claude-fast` and this branch were pushed to
-  `origin` at the human's request, together with Entire's session checkpoints.
-  That was for those pushes; any other push, fetch or pull still needs the
-  human's say.
+- GitHub (human, 2026-10-11): the human pushes, the agent does not (its shell
+  is refused a push). `claude-fast` is on `origin` with n1's code. This branch
+  goes up with `git push origin claude-build`, run by the human; Entire's push
+  hook then uploads the session checkpoints with it. Fetching or pulling still
+  needs the human's say.
 - Fair play (human, 2026-10-11): get the best results first, then revisit the
   helper that opens views the model names by label before any submission. The
   fast line opens the target of a link a page has disabled; the review of the
