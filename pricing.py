@@ -20,25 +20,30 @@ including the time (convert the page's time zone to UTC when it is stated). Numb
 keeping a locale hint such as "1.234,5 (de-DE)" when the page gives one or when separators are ambiguous.
 When one message or table lists several keys, rates, tariffs or bands, include ALL of them, not only the ones
 you think apply. Leave a field out rather than guessing it; use null only for a value proven absent.
-Value fields contain only the value (and its locale hint); put any explanation in a separate note field.
+Copy every number character for character as the page shows it, with its separators and the format tag printed
+next to it (e.g. "12,345 (en-US)" or "1.234,5"); never convert, round or re-punctuate a number. No explanations or
+quotes (the calculation ignores them); add a note of a few words only where a remark is indispensable.
 authorized is true only when the sender (local part and the bidder's own mail domain) and subject are the
 ones the brief names for that topic; otherwise report it with authorized false.
 - tender: reference, scenario_date, bidder_mail_domain
 - position: position, tender_quantity, unit, requirement_ref, short_text
-- qa_quantity: answer, date, position, new_quantity            (a Q&A answer that sets a position's quantity)
-- qa_withdrawal: answer, date, withdrawn_answer                 (an answer withdrawing an earlier answer)
-- qa_keys: answer, date, position, and any of condition_group, setup_fee_eur, packaging_key, delivery_key,
+- qa_quantity: answer_number, date, position, new_quantity     (a Q&A answer that sets a position's quantity)
+- qa_withdrawal: answer_number, date, withdrawn_answer          (withdrawn_answer = the NUMBER it withdraws; an
+  answer that withdraws or retracts another is ONLY a qa_withdrawal, never a qa_quantity)
+- qa_keys: answer_number, date, position, and any of condition_group, setup_fee_eur, packaging_key, delivery_key,
   setup_pool_key, bonus_plan_key                                (per-position assignments in Q&A answers)
-- qa_amendment: answer, date, revision, requirement_ref, attribute (bore|stroke|pressure|mounting|certification), value
+- qa_amendment: answer_number, date, revision, requirement_ref, attribute (bore|stroke|pressure|mounting|certification), value
+  (answer_number is the Q&A entry's own number such as 1234, never its text; put text in a note field)
 - spec_requirement: revision, revision_status (current|superseded|archive), requirement_ref, bore, stroke, pressure,
   mounting, certification, catalog_group, pieces_per_set, usable_stroke (true if stroke is the usable travel
   that needs end reserves), end_reserve_key
 - material: material_number, active (true/false), catalog_group, bore, stroke, pressure, mounting, certification,
-  available_stock, stock_lead_weeks, production_lead_weeks, pieces_per_carton, surcharge_mass_g,
-  allocation_mass_g, metal_index_key
+  physical_stock (total shown in a stock overview), available_stock (only what is free for delivery: without
+  blocked or quality-inspection stock; open the stock breakdown to read it), stock_lead_weeks,
+  production_lead_weeks, pieces_per_carton, surcharge_mass_g, allocation_mass_g, metal_index_key
 - price_condition: material_number, valid_from, valid_to, currency, fx_key, price_unit (quantity the price refers to),
   number_format (e.g. de-DE or en-US), scales: [{min_qty, price}]
-- material_choice: position, material_number, reason            (your matching decision; or no_active_match: true)
+- material_choice: position, material_number, reason (a few words)   (your matching decision; or no_active_match: true)
 - mail: topic, reference, sender, date, authorized (true if sender/subject are authorized by the brief), plus by topic:
     discount_approval: percent, min_order_value_eur (null if unconditional)
     condition_rules: groups: {group_key: base_only|base_and_surcharge|none}
@@ -148,6 +153,11 @@ def day_end(value) -> datetime | None:
     return parsed
 
 
+def falsy(value) -> bool:
+    """An explicit false, whether sent as a boolean or as text."""
+    return value is False or str(value).strip().lower() in ("false", "no", "nein", "0")
+
+
 def truthy(value) -> bool:
     return str(value).strip().lower() in ("true", "1", "yes", "ja", "aktiv", "active", "freigegeben")
 
@@ -162,9 +172,20 @@ def norm_text(value) -> str:
 
 
 def answer_id(value) -> str:
-    """Q&A answers are referred to as '8152', 'Nr. 8152' or 'Rückfrage 8152': compare the identifier."""
-    digits = re.findall(r"\d+", str(value or ""))
-    return digits[-1].lstrip("0") or "0" if digits else norm_ref(value)
+    """A Q&A entry's identifier ('8152', 'Nr. 8152', 'Rückfrage 8152'); empty for free text."""
+    text = str(value or "").strip()
+    if not text or len(text) > 24:
+        return ""
+    digits = re.findall(r"\d+", text)
+    return (digits[-1].lstrip("0") or "0") if digits else norm_ref(text)
+
+
+def entry_id(row: dict) -> str:
+    for field in ("answer_number", "number", "answer_no", "question_number", "id", "answer"):
+        found = answer_id(row.get(field))
+        if found:
+            return found
+    return ""
 
 
 def norm_ref(value) -> str:
@@ -214,6 +235,10 @@ def validate(kind: str, data: dict) -> list[str]:
                 re.search(r"\d[.,]\d", str(item.get(k))) and not re.search(r"[a-z]{2}-[A-Z]{2}", str(item.get(k)))
                 for item in scales for k in ("min_qty", "price")):
             problems.append("state number_format as the page shows it (e.g. de-DE or en-US): '.' and ',' are ambiguous")
+    if kind.startswith("qa_") and not entry_id(data):
+        problems.append(f"{kind} needs answer_number: the Q&A entry's own number (e.g. 1234), not its text")
+    if kind == "qa_withdrawal" and not answer_id(data.get("withdrawn_answer")):
+        problems.append("withdrawn_answer must be the number of the withdrawn Q&A entry")
     if kind == "qa_amendment" and data.get("attribute") not in ATTRIBUTES:
         problems.append(f"attribute must be one of {ATTRIBUTES}")
     return problems
@@ -243,11 +268,87 @@ def normalize_mail(data: dict) -> dict:
     return data
 
 
+SEPARATED_NUMBER = re.compile(r"-?\d(?:[\d.,'\u00a0\u202f]*\d)?")
+DATE_FIELDS = {"date", "valid_from", "valid_to", "scenario_date"}
+TEXT_FIELDS = {"note", "reason", "short_text", "topic", "sender", "unit", "currency", "mounting", "certification",
+               "number_format", "allocation_rule", "revision_status", "attribute", "answer", "subject"}
+ID_FIELDS = {"reference", "key", "material_number", "position", "answer_number", "withdrawn_answer",
+             "condition_group", "revision", "catalog_group", "requirement_ref", "fx_key", "metal_index_key",
+             "packaging_key", "delivery_key", "setup_pool_key", "bonus_plan_key", "end_reserve_key"}
+
+
+def _compact(text: str) -> str:
+    return re.sub(r"[\s\u00a0\u202f\u200b-\u200d\ufeff]+", "", str(text)).casefold()
+
+
+def _readings(token: str) -> set:
+    """The values a number token can mean in German or US notation."""
+    values = set()
+    for fmt in ("de-DE", "en-US"):
+        value = number(token, fmt)
+        if value is not None:
+            values.add(value.normalize())
+    return values
+
+
+def provenance(data, seen_text: str) -> tuple[list[str], list[str]]:
+    """Check reported values against the text a worker has seen.
+
+    Returns (reformatted, unseen): numbers whose value occurs on the pages but written differently, and
+    identifiers or numbers that occur nowhere (invented or estimated)."""
+    spaced = re.sub(r"[\s\u00a0\u202f]+", " ", seen_text)
+    compact = _compact(seen_text)
+    page_values = None
+    reformatted, unseen = [], []
+
+    def visit(value, field):
+        nonlocal page_values
+        if field in DATE_FIELDS or field in TEXT_FIELDS:
+            return
+        if isinstance(value, dict):
+            for key, item in value.items():
+                visit(item, key)
+            return
+        if isinstance(value, list):
+            for item in value:
+                visit(item, field)
+            return
+        if isinstance(value, bool) or value is None or value == "":
+            return
+        if field in ID_FIELDS:
+            if _compact(value) not in compact:
+                unseen.append(f"{field}={value!r} occurs on no page you read")
+            return
+        if isinstance(value, float) and value.is_integer():
+            value = int(value)
+        token = SEPARATED_NUMBER.search(re.sub(r"[\s\u00a0\u202f]+", " ", str(value)))
+        if not token:
+            return
+        written = token.group(0)
+        if len(re.sub(r"\D", "", written)) < 3:
+            return  # short numbers (percentages, weeks, small counts) occur everywhere; not checked
+        if re.search(r"(?<![\d.,])" + re.escape(written) + r"(?![\d]|[.,]\d)", spaced):
+            return
+        if page_values is None:
+            page_values = {}
+            for match in SEPARATED_NUMBER.finditer(spaced):
+                for reading in _readings(match.group(0)):
+                    page_values.setdefault(reading, match.group(0))
+        same = sorted({page_values[r] for r in _readings(written) if r in page_values})
+        if same:
+            reformatted.append(f"{field}={written!r} is written {same[:3]} on the page")
+        else:
+            unseen.append(f"{field}={written!r} occurs on no page you read")
+    visit(data, "")
+    return reformatted, unseen
+
+
 class Evidence:
     """The shared board of typed records reported by all workers."""
 
-    def __init__(self):
+    def __init__(self, reference: str = "", scenario: str = ""):
         self.records: list[dict] = []
+        self.reference, self.scenario = reference, when(scenario)
 
     def add(self, kind: str, data: dict, source: str = "") -> list[str]:
         if kind == "mail" and isinstance(data, dict):
@@ -256,6 +357,27 @@ class Evidence:
         if not problems:
             self.records.append({"kind": kind, "data": data, "source": source})
         return problems
+
+    def warnings(self, kind: str, data: dict) -> list[str]:
+        """Plausibility hints for an accepted record (the model may correct it)."""
+        if kind == "mail":
+            dated = when(data.get("date"))
+            if (falsy(data.get("authorized")) and self.reference and norm_ref(data.get("reference")) == norm_ref(self.reference)
+                    and (dated is None or self.scenario is None or dated <= self.scenario)):
+                return ["authorized=false alone keeps this message out of the calculation. That is right only when "
+                        "the sender or the subject is not the one the brief names for this topic; if the reason was "
+                        "anything else, record it again with authorized true."]
+            return []
+        if kind != "qa_quantity":
+            return []
+        same = [row for row in self.of("qa_quantity")[:-1] if norm_ref(row.get("position")) == norm_ref(data.get("position"))
+                and number(row.get("new_quantity"), kind=COUNT) == number(data.get("new_quantity"), kind=COUNT)
+                and entry_id(row) != entry_id(data)]
+        if same:
+            return [f"Answer {entry_id(data)} repeats the quantity of answer {entry_id(same[0])} for position "
+                    f"{data.get('position')}. If it withdraws or retracts that answer, report a qa_withdrawal for it "
+                    "(the calculator then ignores both quantity records)."]
+        return []
 
     def of(self, kind: str) -> list[dict]:
         return [record["data"] for record in self.records if record["kind"] == kind]
@@ -316,7 +438,7 @@ def calculate_bid(evidence: Evidence, brief_reference: str = "", brief_scenario:
 
     def applicable(row):
         dated = when(row.get("date"))
-        return (norm_ref(row.get("reference")) == ref and row.get("authorized") is not False
+        return (norm_ref(row.get("reference")) == ref and not falsy(row.get("authorized"))
                 and (dated is None or dated <= scenario))
 
     def latest_mail(topic):
@@ -342,6 +464,7 @@ def calculate_bid(evidence: Evidence, brief_reference: str = "", brief_scenario:
         for item in items(row.get("reserves")):
             reserves[norm_ref(item.get("key"))] = number(item.get("mm_per_end"))
 
+    withdrawing = {entry_id(row) for row in evidence.of("qa_withdrawal")} - {""}
     withdrawn = {answer_id(row.get("withdrawn_answer")) for row in evidence.of("qa_withdrawal")
                  if (when(row.get("date")) or scenario) <= scenario}
 
@@ -354,7 +477,7 @@ def calculate_bid(evidence: Evidence, brief_reference: str = "", brief_scenario:
                           if norm_ref(row.get("revision")) == revision
                           and norm_ref(row.get("requirement_ref")) == norm_ref(requirement_ref)
                           and row.get("attribute") == attribute
-                          and answer_id(row.get("answer")) not in withdrawn
+                          and entry_id(row) not in withdrawn
                           and (when(row.get("date")) or scenario) <= scenario]
             if amendments:
                 spec[attribute] = max(amendments, key=lambda row: when(row.get("date")) or scenario)["value"]
@@ -377,7 +500,7 @@ def calculate_bid(evidence: Evidence, brief_reference: str = "", brief_scenario:
         gaps.append("tender positions")
     keys = defaultdict(dict)
     for row in sorted(evidence.of("qa_keys"), key=lambda row: when(row.get("date")) or scenario):
-        if answer_id(row.get("answer")) in withdrawn or (when(row.get("date")) or scenario) > scenario:
+        if entry_id(row) in withdrawn or (when(row.get("date")) or scenario) > scenario:
             continue
         keys[norm_ref(row.get("position"))].update({k: v for k, v in row.items() if v not in (None, "", [])})
 
@@ -386,11 +509,12 @@ def calculate_bid(evidence: Evidence, brief_reference: str = "", brief_scenario:
         position = positions[position_id]
         line = {"position": position.get("position", position_id), "gaps": []}
         changes = [row for row in evidence.of("qa_quantity")
-                   if norm_ref(row.get("position")) == position_id and answer_id(row.get("answer")) not in withdrawn
+                   if norm_ref(row.get("position")) == position_id and entry_id(row) not in withdrawn
+                   and entry_id(row) not in withdrawing
                    and (when(row.get("date")) or scenario) <= scenario]
         quantity = number(position.get("tender_quantity"), kind=COUNT)
         if changes:
-            latest = max(changes, key=lambda row: (when(row.get("date")) or scenario, str(row.get("answer"))))
+            latest = max(changes, key=lambda row: (when(row.get("date")) or scenario, entry_id(row)))
             quantity = number(latest.get("new_quantity"), kind=COUNT)
         spec, problem = required_for(position.get("requirement_ref"))
         if problem:
@@ -543,6 +667,8 @@ def calculate_bid(evidence: Evidence, brief_reference: str = "", brief_scenario:
         if assigned.get("delivery_key") and not commitment:
             line["gaps"].append(f"delivery commitment {assigned.get('delivery_key')}")
         stock = number(material.get("available_stock"), kind=COUNT)
+        if stock is None and material.get("physical_stock") not in (None, ""):
+            line["gaps"].append(f"available stock of {material.get('material_number')} (only the physical total is known)")
         if (commitment and norm_ref(commitment.get("material_number")) == norm_ref(line["material_number"])
                 and number(commitment.get("max_quantity"), kind=COUNT) is not None
                 and pooled <= number(commitment.get("max_quantity"), kind=COUNT)

@@ -88,10 +88,10 @@ def scenario(threshold="1000.00"):
 class Calculation(unittest.TestCase):
     def test_numbers_and_allocation(self):
         self.assertEqual(number("12.345,6 (de-DE)"), Decimal("12345.6"))
-        self.assertEqual(number("186,615 (en-US)"), Decimal("186615"))
+        self.assertEqual(number("349,207 (en-US)"), Decimal("349207"))
         self.assertEqual(number("1,5"), Decimal("1.5"))
         # Explanations appended by a model must not merge into the number.
-        self.assertEqual(number("238,098 (en-US = 238098 EUR per 100 ST)"), Decimal("238098"))
+        self.assertEqual(number("612,345 (en-US = 612345 EUR per 100 ST)"), Decimal("612345"))
         self.assertEqual(number("4.321,5 (de-DE; 4321.5 per unit)"), Decimal("4321.5"))
         self.assertEqual(number("100 ST"), Decimal("100"))
         self.assertEqual(number("EUR 1.234,56", "de-DE"), Decimal("1234.56"))
@@ -99,8 +99,8 @@ class Calculation(unittest.TestCase):
         self.assertEqual(number("1.250", kind="count"), Decimal("1250"))
         self.assertEqual(number("1,250", kind="count"), Decimal("1250"))
         self.assertEqual(number("1.250", kind="amount"), Decimal("1250"))
-        self.assertEqual(number("517,25", kind="amount"), Decimal("517.25"))
-        self.assertEqual(number("1.084"), Decimal("1.084"))  # rates keep the decimal point
+        self.assertEqual(number("731,45", kind="amount"), Decimal("731.45"))
+        self.assertEqual(number("1.137"), Decimal("1.137"))  # rates keep the decimal point
         self.assertEqual(allocate(Decimal("1.00"), [Decimal(1)] * 3, ["b", "a", "c"], "largest_remainder"),
                          [Decimal("0.33"), Decimal("0.34"), Decimal("0.33")])
 
@@ -177,6 +177,55 @@ class Calculation(unittest.TestCase):
                 record["data"]["withdrawn_answer"] = "Rückfrage Nr. 12"
         by = {p["position"]: p for p in calculate_bid(evidence)["answer"]["positions"]}
         self.assertEqual(by["2.1"]["quantity"], 12)
+
+    def test_answer_text_is_not_an_identifier(self):
+        evidence, _ = scenario()
+        for record in evidence.records:
+            data = record["data"]
+            if record["kind"] == "qa_quantity" and data.get("answer") == "12":
+                data["answer"] = "The binding quantity for position 2.1 is now 15 pieces."
+                data["answer_number"] = "12"
+        by = {p["position"]: p for p in calculate_bid(evidence)["answer"]["positions"]}
+        self.assertEqual(by["2.1"]["quantity"], 12)
+        problems = Evidence().add("qa_quantity", {"answer": "The binding quantity for position 1 is now 32 sets.",
+                                                  "position": "1", "new_quantity": "32"})
+        self.assertTrue(any("answer_number" in problem for problem in problems))
+
+    def test_a_withdrawing_answer_recorded_as_a_quantity_is_ignored(self):
+        evidence, _ = scenario()
+        # The withdrawing answer 13 was also (wrongly) recorded as a quantity change repeating answer 12.
+        evidence.add("qa_quantity", {"answer_number": "13", "date": "2030-03-03T09:00:00Z", "position": "2.1",
+                                     "new_quantity": "15"})
+        self.assertTrue(evidence.warnings("qa_quantity", evidence.of("qa_quantity")[-1]))
+        by = {p["position"]: p for p in calculate_bid(evidence)["answer"]["positions"]}
+        self.assertEqual(by["2.1"]["quantity"], 12)
+
+    def test_reported_values_must_come_from_the_pages(self):
+        from pricing import provenance
+        page = "Ref TX-31 | Scale 25 (en-US) | 349,207 (en-US) | unit 100 | rate 0,8812 | fee 1.240,00 | key PQ-7"
+        reformatted, unseen = provenance({"scales": [{"min_qty": "25", "price": "349.207"}], "valid_from": "2031-01-01"}, page)
+        self.assertEqual((len(reformatted), unseen), (1, []))
+        self.assertIn("'349,207'", reformatted[0])
+        self.assertEqual(provenance({"scales": [{"min_qty": "25", "price": "349,207 (en-US)"}], "key": "PQ-7",
+                                     "rates": [{"key": "PQ-7", "eur_per_unit": "0,8812"}], "percent": 5.0}, page), ([], []))
+        _, unseen = provenance({"fee_eur": "1500", "key": "PQ-9", "percent": 7, "reference": "TX-31"}, page)
+        self.assertEqual(len(unseen), 2)  # an invented fee and an invented key; a short percentage is not checked
+
+    def test_unauthorized_flag_on_an_exact_reference_record_is_questioned(self):
+        e = Evidence("TX-1", "2030-03-10T08:00:00Z")
+        record = {"topic": "fx_fixing", "reference": "TX-1", "sender": "a@b.test", "date": "2030-03-01",
+                  "authorized": "false", "rates": [{"key": "K", "eur_per_unit": "1.5"}]}
+        self.assertEqual(e.add("mail", record), [])
+        self.assertTrue(e.warnings("mail", record))
+        self.assertFalse(e.warnings("mail", {**record, "reference": "TX-1-B"}))
+        self.assertFalse(e.warnings("mail", {**record, "date": "2030-04-01"}))
+
+    def test_physical_stock_alone_is_a_gap(self):
+        evidence, _ = scenario()
+        for record in evidence.records:
+            if record["kind"] == "material" and record["data"]["material_number"] == "M-A":
+                record["data"]["physical_stock"] = record["data"].pop("available_stock")
+        self.assertIn("2.1: available stock of M-A (only the physical total is known)", calculate_bid(evidence)["gaps"])
 
     def test_failed_threshold_gives_zero_discount_and_missing_evidence_is_a_gap(self):
         evidence, _ = scenario(threshold="999999")

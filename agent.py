@@ -12,21 +12,38 @@ import rfq_agent
 
 def site_contexts(playwright, task: dict) -> dict:
     """Each website gets one browser (its tabs share the session); sites wrap around the run's browsers.
-    Browsers are attached on first use."""
+    Browsers are attached on first use. The "__fresh__" entry opens a website in a new browser context on
+    another browser, for recovery when a website stops responding in its own session."""
     count = min(max(1, len(browsers.cdp_urls()) or 4), len(task["access"]))
     attached = {}
     lock = asyncio.Lock()
+    home = {site["siteId"]: i % count for i, site in enumerate(task["access"])}
+    spares = {"next": 0}
+
+    async def first_page(index):
+        async with lock:
+            if index not in attached:
+                _, page = await browsers.connect(playwright, index)
+                attached[index] = page
+                return page, True
+        return attached[index], False
 
     def factory(index):
         async def new_page():
-            async with lock:
-                if index not in attached:
-                    _, page = await browsers.connect(playwright, index)
-                    attached[index] = page
-                    return page
-            return await attached[index].context.new_page()
+            page, fresh = await first_page(index)
+            return page if fresh else await page.context.new_page()
         return new_page
-    return {site["siteId"]: factory(i % count) for i, site in enumerate(task["access"])}
+
+    async def fresh(site_id):
+        spares["next"] += 1
+        index = (home.get(site_id, 0) + spares["next"]) % count if count > 1 else 0
+        page, _ = await first_page(index)
+        context = await page.context.browser.new_context()
+        return await context.new_page()
+
+    contexts = {site["siteId"]: factory(home[site["siteId"]]) for site in task["access"]}
+    contexts["__fresh__"] = fresh
+    return contexts
 
 
 async def solve(task: dict, contexts: dict) -> dict | None:
