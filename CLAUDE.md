@@ -32,13 +32,37 @@ Claude Code). Interfaces are in ARCHITECTURE.md, status in PROGRESS.md.
   piling them on. Prefer one small, smart mechanism over several defensive
   layers, and verify on live runs. Elegance of the system is judged.
 
-- No runs until the human says so (2026-10-11): no sandbox test runs and no local
-  agent runs, because the platform is being upgraded and results would mislead.
-  Reading code, logs and scores, and offline tests, are fine.
-- Nothing is submitted from `claude-build`. The team's latest passing submission
-  (78.1, from a teammate's code line) is what goes into the final run.
+- Test runs are allowed again (human, 2026-10-11, later that day): "if we have a
+  strong candidate, make a test run on the platform and see where it went
+  wrong". At most four at once for the whole team. A scored submission still
+  needs the human's explicit yes for that package.
+- The work now is the fast line, not `claude-build` (human, 2026-10-11): take the
+  teammate's compact Qwen and Clef package that scored 98.7, make it reliable
+  and much faster, aiming at the top five by cost × time. It lives on the local
+  branch `claude-fast`, checked out next to this copy in `../The-Last-Team-fast`.
+- Fixes must be general mechanisms, never special cases (human, 2026-10-11): "make
+  sure it doesn't end up becoming a leaking bucket problem where fixing one
+  issue creates two more". Measure each on a run before stacking the next.
+- What is submitted: package "a2-7bb935d" (commit `7bb935d` of `claude-fast`),
+  pushed by the human on 2026-10-11: quality 100, $0.068, 03:18, review passed.
+  It goes into the final run until a later submission passes review. Do not
+  propose replacing it unless a candidate beats it over several test runs.
 - Fair play (human, 2026-10-11): get the best results first, then revisit the
-  helper that opens views the model names by label before any submission.
+  helper that opens views the model names by label before any submission. The
+  fast line opens the target of a link a page has disabled; the review of the
+  submitted package passed with that in it and without a note.
+
+## The fast line
+
+`../The-Last-Team-fast` (branch `claude-fast`) is its own package at the top
+level: `agent.py` (orchestration), `agents.py` (master, workers, prompts),
+`web.py` (browser layer), `submit.py` (form filler and signing), `pricing.py`
+(calculator and record guide), `llm.py`. Tools for it are outside every
+repository, in `../The-Last-Team-run-report/tools`: `test_run.py <working copy>
+<label> [commit]` starts a sandbox test run of a commit and keeps its whole
+log, `live_view.py <labels>` summarises runs, `smoke_web.py`, `smoke_modal.py`
+check the browser layer against a made-up local site. Run them with the
+package interpreter of this copy.
 
 ## The team's 78.1 agent
 
