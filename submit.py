@@ -93,6 +93,7 @@ class Submitter:
         self.tan_signed: str | None = None   # the code the form was last signed with
         self.tan_refused: set[str] = set()   # codes the form did not accept
         self.mailbox_before: set[str] = set()  # the mailbox's links before the latest request: what is new is the code
+        self.gave_up = False                   # the form gives no way forward: stop trying
         self.tan_requested = False
         self.tan_requests = 0
 
@@ -276,15 +277,24 @@ class Submitter:
 
     # ------------------------------------------------------------------ run
     async def run(self, until: float, start_url: str = "") -> str | None:
-        try:
-            return await self._run(until, start_url)
-        except Exception as error:  # the caller must always learn the outcome
-            self.log(f"[submit] failed: {type(error).__name__}: {str(error)[:300]}")
-            return None
+        """Enter and sign the bid. A page that does not load, a slow server or a failed model call is no reason
+        to end without an answer: the form is taken up again from the page as it is, until the time is used up
+        or the form itself gives no way forward (no accepted signing code after three requests)."""
+        while llm.clock() < until and not self.gave_up:
+            try:
+                receipt = await self._run(until, start_url)
+                if receipt:
+                    return receipt
+            except Exception as error:
+                self.log(f"[submit] {type(error).__name__}: {str(error)[:200]}; taking the form up again")
+            await asyncio.sleep(1)
+        return None
 
     async def _run(self, until: float, start_url: str) -> str | None:
-        if self.tab.page is None:
+        if self.tab.page is None or self.tab.page.is_closed():
             self.log(f"[submit] {await self.tab.open(start_url)}")
+        elif not self.tab.page.url.startswith("http"):  # an earlier attempt to open the website got no answer
+            self.log(f"[submit] {await self.tab.goto(start_url)}")
         last, repeats, failures = None, 0, 0
         for _ in range(120):
             if llm.clock() > until:
@@ -377,6 +387,7 @@ class Submitter:
             if not self.tan_requested:
                 if self.tan_requests >= 3 or not self.button(obs, "request_tan"):
                     self.log("[submit] no accepted signing code after three requests; giving up")
+                    self.gave_up = True
                     return True
                 self.mailbox_before = await self.mailbox_links()
                 self.log(f"[submit] {await tab.click(self.button(obs, 'request_tan').id, strict=True)}")

@@ -514,7 +514,10 @@ class Tab:
         # typing behind a dialog reports success and changes nothing: read the field back
         after = await locator.evaluate("e => e.value", timeout=2000)
         if value and after != value and after == (control.value or ""):
-            raise Blocked(f"typing into {control.label!r} had no effect: something covers it or the page changed")
+            cover = await self._cover(locator)
+            raise Blocked(f"typing into {control.label!r} had no effect: " + (
+                f"the dialog '{cover}' covers it; close that dialog first" if cover
+                else "the field does not take text now (read the page again; it may have changed or be locked)"))
         return f"filled {control.label!r} with {value!r}"
 
     async def select(self, cid: int, option: str) -> str:
