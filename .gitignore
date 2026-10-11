@@ -6,4 +6,4 @@ __pycache__/
 *.tar.gz
 .idea/
 .codex/
-.entire/
+.entire/.runs/
