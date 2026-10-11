@@ -43,10 +43,16 @@ Claude Code). Interfaces are in ARCHITECTURE.md, status in PROGRESS.md.
 - Fixes must be general mechanisms, never special cases (human, 2026-10-11): "make
   sure it doesn't end up becoming a leaking bucket problem where fixing one
   issue creates two more". Measure each on a run before stacking the next.
-- What is submitted: package "a2-7bb935d" (commit `7bb935d` of `claude-fast`),
-  pushed by the human on 2026-10-11: quality 100, $0.068, 03:18, review passed.
+- What is submitted: test run "n1-8160c8a" (commit `8160c8a` of `claude-fast`,
+  package `56188bda1b24`), pushed by the human on 2026-10-11: quality 100,
+  $0.0667, 02:11, 8.796 $·s. Four of four test runs of that package scored 100.
   It goes into the final run until a later submission passes review. Do not
-  propose replacing it unless a candidate beats it over several test runs.
+  propose replacing it unless a candidate beats it over several test runs
+  (earlier commits managed about two runs in three).
+- GitHub (human, 2026-10-11): `claude-fast` and this branch were pushed to
+  `origin` at the human's request, together with Entire's session checkpoints.
+  That was for those pushes; any other push, fetch or pull still needs the
+  human's say.
 - Fair play (human, 2026-10-11): get the best results first, then revisit the
   helper that opens views the model names by label before any submission. The
   fast line opens the target of a link a page has disabled; the review of the
@@ -107,6 +113,13 @@ Sandbox test run (authorised, at most four at once): run the fair-play check,
 then use the atira MCP tools `test_run`, `wait_for_run`, `diagnose_run`,
 `run_logs` and `run_screenshot`, or `atira test-run .\my-agent --challenge rfq`.
 Never call `atira submit` or the MCP submit tool without explicit approval.
+
+Entire records the agent sessions of this repository. Its commit hook asks on
+the console whether to link a commit to the session, which an agent's shell
+cannot answer, so `.entire/settings.local.json` (not in git) sets
+`"commit_linking": "always"`. Without that file a commit made from an agent
+session hangs in the hook. The session is attached to this working copy, so
+commits made in `../The-Last-Team-fast` carry no checkpoint.
 
 The Atira CLI may be missing from PATH in a long-lived shell; it lives at
 `%LOCALAPPDATA%\atira\bin\atira.cmd`. Run artifacts go to the external data
