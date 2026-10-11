@@ -207,8 +207,11 @@ async def solve(task: dict, page) -> dict | None:
         if bid["gaps"] and end - llm.clock() > 7 * 60:
             log(f"{llm.stamp()} [master] open gaps go to every worker: " + "; ".join(bid["gaps"])[:700])
             until = min(llm.clock() + 100, end - 6 * 60)
-            goal = ("The bid calculation still misses the facts below. Find and record the ones this website holds, "
-                    "reading only what they need. If none of them can be on this website, set done at once.\n"
+            goal = ("The bid calculation still misses the facts below: the calculator does not have them, so none of "
+                    "them is recorded yet, whatever was read before, and a key that another website assigned is not "
+                    "the fact itself. Find and record the ones this website holds, reading only what they need (a "
+                    "message or page read before may hold more entries than were recorded). If none of them can be "
+                    "on this website, set done at once.\n"
                     + "\n".join(f"- {gap}" for gap in bid["gaps"][:30]))
             for worker in workers.values():
                 worker.assign([goal])

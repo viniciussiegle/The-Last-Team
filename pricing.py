@@ -339,9 +339,31 @@ class Evidence:
         if kind == "mail" and isinstance(data, dict):
             data = normalize_mail(data)
         problems = validate(kind, data)
+        if not problems and kind == "material":
+            problems = self.contradicts(data)
         if not problems:
             self.records.append({"kind": kind, "data": data, "source": source})
         return problems
+
+    def contradicts(self, data: dict) -> list[str]:
+        """A material number stands for one article: a record that gives a recorded number another catalog group
+        or other technical attributes has mixed two articles up."""
+        number_ = norm_ref(data.get("material_number"))
+        problems = []
+        for earlier in self.of("material"):
+            if norm_ref(earlier.get("material_number")) != number_:
+                continue
+            for attribute in ("catalog_group",) + ATTRIBUTES:
+                old, new = earlier.get(attribute), data.get(attribute)
+                if old in (None, "") or new in (None, ""):
+                    continue
+                same = norm_ref(old) == norm_ref(new) if attribute == "catalog_group" else same_attribute(attribute, old, new)
+                if not same:
+                    problems.append(f"material {data.get('material_number')} was recorded with {attribute}={old}; "
+                                    f"{attribute}={new} belongs to another material number: check the number on the page")
+            if problems:
+                break
+        return problems[:2]
 
     def of(self, kind: str) -> list[dict]:
         return [record["data"] for record in self.records if record["kind"] == kind]
@@ -481,6 +503,9 @@ def calculate_bid(evidence: Evidence, brief_reference: str = "", brief_scenario:
         spec, problem = required_for(position.get("requirement_ref"))
         if problem:
             line["gaps"].append(problem)
+        line["_about"] = ", ".join(part for part in (
+            f"requirement {position['requirement_ref']}" if position.get("requirement_ref") else "",
+            f"catalog group {spec['catalog_group']}" if spec and spec.get("catalog_group") else "") if part)
         if quantity is not None:
             unit = norm_text(position.get("unit"))
             pieces = unit in ("", "stk", "stck", "stück", "stueck", "st", "pcs", "pc", "piece", "pieces", "ea", "each")
@@ -721,7 +746,8 @@ def calculate_bid(evidence: Evidence, brief_reference: str = "", brief_scenario:
         total += quantity * unit_price
         answer_positions.append(entry)
     for line in lines:
-        gaps.extend(f"{line['position']}: {gap}" for gap in line["gaps"])
+        about = f" ({line['_about']})" if line.get("_about") else ""
+        gaps.extend(f"{line['position']}{about}: {gap}" for gap in line["gaps"])
     decision = "no_bid" if no_match else "bid"
     answer = {"tender_reference": reference, "decision": decision, "currency": "EUR",
               "discount_percent": float(discount) if decision == "bid" else
