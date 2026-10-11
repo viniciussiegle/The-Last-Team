@@ -476,6 +476,8 @@ class Tab:
         """Click a control. `strict` refuses to act on a control that a dialog covers (form filling: the dialog
         must be dealt with first); otherwise such a control is clicked directly, without waiting under the overlay."""
         control, locator = self._locate(cid)
+        if control.href and urlparse(urljoin(self.page.url, control.href)).netloc not in ("", self.host):
+            raise Blocked(f"{control.describe()[:80]} leads to another website; a run stays on its own websites")
         if control.disabled and control.href:  # a locked overlay disables the link, not its target
             await self.goto(control.href)
             return f"opened the target of {control.describe()[:120]}"
