@@ -167,10 +167,10 @@ def check_copied(data, shown: str, path: str = "") -> list[str]:
         base = text[:hint.start()].strip() if hint else text
         if hint and squash(base) in shown:
             return base
-        token = re.search(r"-?\d(?:[\d.,'  ]*\d)?", base)
-        if re.match(r"[^\W\d_]{1,8}[-_/. ]?\d", base) or not token:
-            return None  # an identifier that stands on no page
-        digits = re.sub(r"[  ]", "", token.group(0))
+        token = re.match(r"\s*(-?\d(?:[\d.,'  ]*\d)?)", base)
+        if not token:
+            return None  # not a number (it does not start with one): an identifier that stands on no page
+        digits = re.sub(r"[  ]", "", token.group(1))
         if re.search(r"[.,']", digits):
             return base if squash(digits) in shown else None
         if plain is None:

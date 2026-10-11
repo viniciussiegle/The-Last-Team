@@ -346,12 +346,13 @@ class Worker:
         if reply.get("tan"):
             self.result["tan"] = str(reply["tan"]).strip()
         records = reply.get("records") or []
-        # what this worker may copy from: everything it was shown so far (pages, shared facts) and the brief;
-        # a turn that read a screenshot cannot be checked against text
-        self.shown += pricing.squash(user)
+        # What this worker may copy from: the pages it was shown, the brief, and records already accepted from any
+        # website. Nothing a model wrote counts (subgoals, notes, rejected records), so an invented value cannot
+        # come back as evidence. A turn that read a screenshot cannot be checked against text.
+        self.shown += pricing.squash(page)
         before = len(self.board.accepted)
-        self.problems = self.board.add(self.id, records, reply.get("notes") or [],
-                                       shown=None if images else self.shown + self.brief_text)
+        source = self.shown + self.brief_text + pricing.squash("\n".join(self.board.accepted))
+        self.problems = self.board.add(self.id, records, reply.get("notes") or [], shown=None if images else source)
         for line in self.board.accepted[before:]:
             self.log(f"[{self.id}] + {line[:400]}")
         for note in reply.get("notes") or []:
