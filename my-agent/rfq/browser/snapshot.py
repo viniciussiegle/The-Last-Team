@@ -17,6 +17,11 @@ SNAPSHOT_JS = r"""({start, expanded}) => {
   const visible = e => { const r=e.getBoundingClientRect(),s=getComputedStyle(e);
     return r.width>0&&r.height>0&&s.visibility!=='hidden'&&s.display!=='none'; };
   const tidy = s => (s||'').replace(/[\u200B-\u200D\uFEFF]/g,'').replace(/\s+/g,' ').trim();
+  // A label's text as shown. With a dropdown inside, that would include every option, so the name would change with
+  // the options and a batch could no longer find the control; and in a collapsed section nothing is shown. In both
+  // cases the text is taken as written, without the fields.
+  const caption = l => { const shown=l.querySelector('select')?'':tidy(l.innerText); if(shown) return shown;
+    const c=l.cloneNode(true); c.querySelectorAll('select,input,textarea,br').forEach(f=>f.replaceWith(' ')); return tidy(c.textContent); };
   let next=start;
   const elements=[];
   // Hidden controls retain attributes across redraws; clear the previous observation first.
@@ -26,9 +31,10 @@ SNAPSHOT_JS = r"""({start, expanded}) => {
     if(!visible(e)||e.getAttribute('type')==='hidden') continue;
     const id=next++; e.setAttribute('data-rfq-observe',String(id));
     let label=e.getAttribute('aria-label')||'';
-    if(e.labels&&e.labels.length) label=Array.from(e.labels).map(l=>tidy(l.innerText)).join(' ');
-    // A dropdown's own text is its option list, which is reported separately.
-    label=label||(e.tagName==='SELECT'?'':tidy(e.innerText))||e.getAttribute('placeholder')||e.getAttribute('title')||e.getAttribute('name')||'';
+    if(e.labels&&e.labels.length) label=tidy(Array.from(e.labels).map(caption).join(' '))||label;
+    // A field's own text is its content (a dropdown's option list is reported separately), never its name. Other
+    // controls are named by their text; in a collapsed section none is shown, so there the text as written is used.
+    label=label||(/^(SELECT|TEXTAREA)$/.test(e.tagName)?'':tidy(e.innerText)||(e.closest('details:not([open])')?tidy(e.textContent):''))||e.getAttribute('placeholder')||e.getAttribute('title')||e.getAttribute('name')||'';
     const type=e.getAttribute('type')||e.getAttribute('role')||e.tagName.toLowerCase();
     const value=type==='password'?(e.value?'[secret]':''):('value' in e?e.value:'');
     const options=e.tagName==='SELECT'?Array.from(e.options).map(o=>({value:o.value,text:o.text})):undefined;
@@ -38,8 +44,15 @@ SNAPSHOT_JS = r"""({start, expanded}) => {
     if(x>=0&&y>=0&&x<innerWidth&&y<innerHeight){
       const top=document.elementFromPoint(x,y);
       if(top&&!e.contains(top)&&!top.contains(e)){
-        const blocker=top.closest('dialog,[role=dialog],[aria-modal=true],section,aside')||top;
-        obstruction=tidy(blocker.getAttribute('aria-label')||blocker.innerText||blocker.tagName).slice(0,180);
+        // Only a real cover counts: a dialog, or a layer laid over at least half of the window, which may be an
+        // ancestor of the element at the control's centre. Ordinary page content is in front of a control only
+        // while the control is scrolled away, and the browser scrolls it back to use it.
+        for(let c=top;c&&!c.contains(e);c=c.parentElement){
+          const r=c.getBoundingClientRect(), area=(Math.min(r.right,innerWidth)-Math.max(r.left,0))*(Math.min(r.bottom,innerHeight)-Math.max(r.top,0));
+          if(c.matches('dialog,[role=dialog],[aria-modal=true]')||(area*2>=innerWidth*innerHeight&&/fixed|absolute/.test(getComputedStyle(c).position))){
+            obstruction=tidy(c.getAttribute('aria-label')||c.innerText||c.tagName).slice(0,180); break;
+          }
+        }
       }
     }
     elements.push({id,tag:e.tagName.toLowerCase(),type,label:label.slice(0,350),value,checked,

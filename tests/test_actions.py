@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import sys
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from playwright.async_api import async_playwright
 
@@ -297,6 +299,24 @@ class ObservedActions(unittest.IsolatedAsyncioTestCase):
                            if line.startswith("[") and "Synthetic target" in line)
         self.assertNotIn("OBSCURED", button_line)
 
+    async def test_snapshot_does_not_mark_a_control_that_is_only_scrolled_under_a_thin_fixed_bar(self):
+        await self.page.set_content(
+            '<div style="position:fixed;top:0;left:0;right:0;height:60px;z-index:10;background:silver">Synthetic bar</div>'
+            '<div style="height:300px"></div>'
+            '<button id="synthetic-target" onclick="document.body.dataset.clicked=\'yes\'">Synthetic target</button>'
+            '<div style="height:2000px"></div>'
+        )
+        await self.page.evaluate("scrollTo(0, 290)")
+        target = await self.observed_id("#synthetic-target")
+        # The bar really is what lies at the button's centre now.
+        self.assertEqual(await self.page.locator("button").evaluate(
+            "e => { const r = e.getBoundingClientRect(); return document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2).innerText }"),
+            "Synthetic bar")
+
+        self.assertEqual(self.session.elements[target]["obstruction"], "")
+        await act(self.session, {"kind": "click", "id": target})
+        self.assertEqual(await self.page.locator("body").get_attribute("data-clicked"), "yes")
+
     async def test_batch_keeps_its_targets_when_a_notice_appears_and_renumbers_controls(self):
         await self.page.set_content(
             '<main><button id="first" aria-label="synthetic first" '
@@ -342,6 +362,83 @@ class ObservedActions(unittest.IsolatedAsyncioTestCase):
 
         self.assertNotIn("skipped", result)
         self.assertEqual(await self.page.locator('select[aria-label="synthetic depth"]').input_value(), "560")
+
+    async def test_batch_finds_a_dropdown_inside_its_label_again_after_its_options_changed(self):
+        await self.page.set_content(
+            '<label>Size<select id="size"><option value="">choose</option><option>Small</option><option>Large</option></select></label>'
+            '<label>Colour<select id="colour"><option value="">choose</option></select></label>'
+            '<button type="button" onclick="const size=document.getElementById(\'size\'),colour=document.getElementById(\'colour\');'
+            'document.body.dataset.applied=size.value+\'/\'+colour.value;'
+            'if(colour.options.length<2)colour.innerHTML+=\'<option>Red</option><option>Blue</option>\'">Apply</button>'
+        )
+        size = await self.observed_id("#size")
+        colour = int(await self.page.locator("#colour").get_attribute("data-rfq-observe"))
+        apply = int(await self.page.locator("button").get_attribute("data-rfq-observe"))
+
+        result = await act_many(self.session, [{"kind": "select", "id": size, "option": "Large"},
+                                              {"kind": "click", "id": apply},
+                                              {"kind": "select", "id": colour, "option": "Red"},
+                                              {"kind": "click", "id": apply}])
+
+        self.assertNotIn("skipped", result)
+        self.assertEqual(await self.page.locator("body").get_attribute("data-applied"), "Large/Red")
+
+    async def test_dropdown_option_is_found_by_the_start_of_its_text_or_its_form_value_without_waiting(self):
+        await self.page.set_content(
+            '<select aria-label="synthetic item"><option value="">choose</option>'
+            '<option value="a1">Item A, large</option><option value="b2">Item B, small</option></select>'
+        )
+        item = await self.observed_id("select")
+        started = time.monotonic()
+
+        await act(self.session, {"kind": "select", "id": item, "option": "Item B"})
+        self.assertEqual(await self.page.locator("select").input_value(), "b2")
+        await act(self.session, {"kind": "fill", "id": item, "text": "a1"})
+        self.assertEqual(await self.page.locator("select").input_value(), "a1")
+        with self.assertRaisesRegex(ValueError, r"Item A, large \(a1\) \| Item B, small \(b2\)"):
+            await act(self.session, {"kind": "select", "id": item, "option": "Item C"})
+
+        self.assertLess(time.monotonic() - started, 1)
+
+    async def test_fill_opens_the_collapsed_section_around_a_field(self):
+        await self.page.set_content('<details><summary>More</summary><label>Note<input id="note"></label></details>')
+        note = await self.observed_id("#note")
+
+        await act(self.session, {"kind": "fill", "id": note, "text": "synthetic note"})
+
+        self.assertEqual(await self.page.locator("#note").input_value(), "synthetic note")
+        # Named by its label although nothing inside a collapsed section is rendered.
+        self.assertEqual(self.session.elements[note]["label"], "Note")
+
+    async def test_batch_reading_keeps_its_targets_when_an_earlier_action_renumbers_controls(self):
+        await self.page.set_content(
+            '<button id="more" aria-label="synthetic more" onclick="document.body.insertAdjacentHTML(\'afterbegin\','
+            '\'<a href=#one>synthetic one</a><a href=#two>synthetic two</a>\')">More</button>'
+            '<button id="first" onclick="document.body.append(\'synthetic first detail\')">Detail A</button>'
+            '<button id="second" onclick="document.body.append(\'synthetic second detail\')">Detail B</button>'
+        )
+        more = await self.observed_id("#more")
+        second = int(await self.page.locator("#second").get_attribute("data-rfq-observe"))
+
+        result = await act_many(self.session, [{"kind": "click", "id": more},
+                                              {"kind": "read_all", "reveal_ids": [second]}])
+
+        self.assertIn("synthetic second detail", result)
+        self.assertNotIn("synthetic first detail", result)
+        # More, which now carries the number the model gave, was not used a second time.
+        self.assertEqual(await self.page.locator("a").count(), 2)
+
+    async def test_batch_waits_for_a_button_that_disables_itself_while_it_loads_more(self):
+        await self.page.set_content(
+            '<ul></ul><button aria-label="synthetic more" onclick="this.disabled=true;setTimeout(()=>{'
+            'document.querySelector(\'ul\').append(document.createElement(\'li\'));this.disabled=false},500)">More</button>'
+        )
+        more = await self.observed_id("button")
+
+        result = await act_many(self.session, [{"kind": "click", "id": more}, {"kind": "click", "id": more}])
+
+        self.assertNotIn("skipped", result)
+        self.assertEqual(await self.page.locator("li").count(), 2)
 
     async def test_batch_never_retargets_a_lookalike_link_after_reordering(self):
         await self.page.set_content(
@@ -389,6 +486,43 @@ class ObservedActions(unittest.IsolatedAsyncioTestCase):
         self.assertLess(time.monotonic() - started, 6)
         self.assertIn("Synthetic survey", str(refused.exception))
         self.assertLess(len(str(refused.exception)), 300)
+
+    async def test_click_closes_a_notice_that_opened_over_its_control_and_goes_through(self):
+        await self.page.set_content(
+            '<button id="target" aria-label="synthetic target" onclick="document.body.dataset.clicked=\'yes\'">Target</button>'
+            '<script>setTimeout(()=>document.body.insertAdjacentHTML("beforeend",\'<div role="dialog" '
+            'aria-label="Synthetic notice" style="position:fixed;inset:0;background:white"><p>Synthetic information</p>'
+            '<button onclick="this.parentElement.remove()">Close</button></div>\'),300)</script>'
+        )
+        target = await self.observed_id("#target")
+        await self.page.locator("[role=dialog]").wait_for()
+
+        with patch("rfq.browser.actions.CLICK_LIMIT_MS", 800):
+            await act(self.session, {"kind": "click", "id": target})
+
+        self.assertEqual(await self.page.locator("body").get_attribute("data-clicked"), "yes")
+        self.assertIn("An informational notice was closed: Synthetic notice", self.session.notices)
+
+    async def test_click_whose_page_arrives_late_counts_as_done_and_is_not_repeated(self):
+        late = []
+
+        async def answer(route):
+            if not route.request.url.endswith("/late"):
+                return await route.fulfill(status=200, content_type="text/html", body='<a href="/late">Onward</a>')
+            late.append(route.request.url)
+            await asyncio.sleep(1.5)  # longer than the click limit set below
+            await route.fulfill(status=200, content_type="text/html", body="<p>synthetic late page</p>")
+        await self.context.route("https://synthetic.example.test/**", answer)
+        await self.page.goto("https://synthetic.example.test/start")
+        link = await self.observed_id("a")
+
+        with patch("rfq.browser.actions.CLICK_LIMIT_MS", 500):
+            await act(self.session, {"kind": "click", "id": link})
+        self.assertTrue(self.page.url.endswith("/late"))  # the action itself waited for the page
+        snapshot = await observe(self.session)
+
+        self.assertIn("synthetic late page", snapshot.text)
+        self.assertEqual(len(late), 1)
 
     async def test_temporary_failure_page_is_retried_through_its_own_control(self):
         await self.page.set_content(

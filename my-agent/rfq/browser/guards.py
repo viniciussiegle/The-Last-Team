@@ -63,13 +63,17 @@ NOTICE_JS = r"""() => {
 }"""
 
 
-async def close_notices(session):
+async def close_notices(session) -> bool:
+    """Close informational notices; says whether there was one."""
+    closed = False
     for frame in session.page.frames:
         try:
             for label in await asyncio.wait_for(frame.evaluate(NOTICE_JS), 2):
                 session.notices.append(f"An informational notice was closed: {label}")
+                closed = True
         except Exception:
             pass
+    return closed
 
 
 async def login(session) -> str:

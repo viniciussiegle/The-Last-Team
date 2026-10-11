@@ -4,8 +4,9 @@ import base64
 import re
 from urllib.parse import urljoin
 
-from .guards import login
+from .guards import close_notices, login
 from .session import origin
+from .snapshot import option_list
 
 
 def element(session, value, wait_if_disabled=False):
@@ -23,6 +24,42 @@ def element(session, value, wait_if_disabled=False):
     return item, item["frame"].locator(f'[data-rfq-observe="{int(value)}"]')
 
 
+async def choose(item, locator, wanted):
+    """Select the option the model means: the only one that fits the most literal reading of what it wrote. It is
+    looked up among the options the page offers now, which an earlier field of the same form may just have changed,
+    because the browser itself waits its full time limit for an exact option text before anything else can be tried."""
+    text = str(wanted)
+    options = await locator.evaluate("e=>Array.from(e.options||[]).map(o=>({value:o.value,text:o.text}))")
+    if item.get("disabled") or not any(o["value"] for o in options):
+        # Its options arrive with an earlier field of the same form; the browser waits for them.
+        try:
+            await locator.select_option(label=text)
+        except Exception:
+            await locator.select_option(value=text)
+        return
+    folded = text.casefold()
+
+    def number(value: str) -> float | None:
+        try:
+            return float(value)
+        except ValueError:
+            return None
+
+    def begins(o: dict) -> bool:
+        # The start of an option's text, but never the first digits of a longer number, which is another value.
+        shown = o["text"].casefold()
+        return bool(folded) and shown.startswith(folded) and not re.match(r"\d[.,]?\d", shown[len(folded) - 1:])
+    for fits in (lambda o: o["text"] == text, lambda o: o["value"] == text,
+                 lambda o: o["text"].casefold() == folded, lambda o: o["value"].casefold() == folded, begins,
+                 lambda o: number(text) is not None and number(text) in (number(o["text"]), number(o["value"]))):
+        found = [index for index, o in enumerate(options) if fits(o)]
+        if len({options[index]["value"] for index in found}) == 1:
+            # By position: asked for a form value, the browser also takes an earlier option whose text is that value.
+            return await locator.select_option(index=found[0])
+    raise ValueError(f"No single option of this dropdown is '{text}'. Give an option's text, or its form value where "
+                     f"one is shown in brackets: {option_list(options)}")
+
+
 async def set_value(item, locator, value):
     """Apply a model-selected form value according to the observed control type."""
     text = str(value)
@@ -31,18 +68,29 @@ async def set_value(item, locator, value):
     elif item.get("type") == "range":
         await locator.evaluate("(e,v)=>{e.value=v;e.dispatchEvent(new Event('input',{bubbles:true}));e.dispatchEvent(new Event('change',{bubbles:true}));}", text)
     elif item.get("tag") == "select":
-        try:
-            await locator.select_option(label=text)
-        except Exception:
-            await locator.select_option(value=text)
+        await choose(item, locator, text)
     else:
         await locator.fill(text)
 
 
 CLICK_LIMIT_MS = 4000
+# How long a page that answers a click slowly, and a control busy loading more content, are waited for.
+LOAD_LIMIT_MS = 20000
+BUSY_LIMIT_MS = 8000
 BATCH_LIMIT = 14
 # Their output is what the model asked to read, so nothing may run after them in the same batch.
 READING_KINDS = {"look", "extract_table", "expand", "open_document", "read_all"}
+
+# A collapsed section lists its controls, but none of them can be used until it is open. A control in a section's
+# own heading is in view either way.
+UNFOLD_JS = "e=>{for(let d=e;d=d.parentElement?.closest('details');)if(!d.querySelector(':scope>summary')?.contains(e))d.open=true}"
+
+
+async def unfolded(session, value, wait_if_disabled=False):
+    """An observed control that is about to be used, with the collapsed sections around it opened."""
+    item, locator = element(session, value, wait_if_disabled)
+    await locator.evaluate(UNFOLD_JS, timeout=CLICK_LIMIT_MS)
+    return item, locator
 
 
 class Blocked(ValueError):
@@ -68,10 +116,44 @@ COVERING_JS = r"""e => {
 }"""
 
 
-async def click_with_confirmation(session, locator, confirm_final=False):
-    session.confirm_final = bool(confirm_final)
+async def wait_while_busy(item: dict, locator):
+    """A control that disables itself when it is used is loading more content, which whatever comes next needs:
+    wait until it can be used again or is gone."""
+    if item.get("href"):
+        return
+    try:
+        await locator.and_(item["frame"].locator(":disabled")).wait_for(state="detached", timeout=BUSY_LIMIT_MS)
+    except Exception:
+        pass
+
+
+async def click_once(session, locator):
+    """One click. A click that was carried out but whose page is slow to arrive counts as done: reported as a
+    failure it would be repeated, and the repeat posts a form step twice."""
     try:
         await locator.click(timeout=CLICK_LIMIT_MS)
+    except Exception as error:
+        # The browser's own account of the attempt says whether the click itself took place.
+        if "click action done" not in str(error):
+            raise
+        try:
+            # Until the new page arrives the old one still counts as loaded, so the arrival itself is awaited.
+            async with session.page.expect_navigation(wait_until="domcontentloaded", timeout=LOAD_LIMIT_MS):
+                pass
+        except Exception:
+            pass
+
+
+async def click_with_confirmation(session, item, locator, confirm_final=False):
+    session.confirm_final = bool(confirm_final)
+    try:
+        try:
+            await click_once(session, locator)
+        except Exception as error:
+            # A notice can open a moment after its page has loaded, in the middle of a batch: close it, click again.
+            if "intercepts pointer events" not in str(error) or not await close_notices(session):
+                raise
+            await click_once(session, locator)
     except Exception as error:
         if "intercepts pointer events" not in str(error):
             raise
@@ -84,6 +166,7 @@ async def click_with_confirmation(session, locator, confirm_final=False):
                       "(close it, or complete what it asks), then repeat this action.") from None
     finally:
         session.confirm_final = False
+    await wait_while_busy(item, locator)
 
 
 def signature(item: dict) -> tuple:
@@ -110,16 +193,24 @@ def relocate(elements: dict, wanted: tuple | None) -> int | None:
 
 def rebind(action: dict, seen: dict, current: dict) -> dict:
     """Point a later action of a batch at the same controls after the page was observed again."""
-    def moved(element_id):
-        target = relocate(current, identity(seen, element_id))
+    def moved(element_id, of_its_kind=False):
+        item = seen.get(int(element_id)) or {}
+        if of_its_kind:
+            # read_all takes its next-page and row-detail controls as examples of a kind, whose link targets differ
+            # from page to page: the first control of that description stands for them.
+            target = next((key for key in sorted(current) if alike(current[key]) == alike(item)), None)
+        else:
+            target = relocate(current, identity(seen, element_id))
         if target is None:
-            label = (seen.get(int(element_id)) or {}).get("label", "")
-            raise LookupError(f"control [{element_id}] '{label[:60]}' is no longer present as observed")
+            raise LookupError(f"control [{element_id}] '{item.get('label', '')[:60]}' is no longer present as observed")
         return target
     rebound = dict(action)
-    for key in ("id", "submit_id"):
+    for key in ("id", "submit_id", "next_id"):
         if rebound.get(key) is not None:
-            rebound[key] = moved(rebound[key])
+            rebound[key] = moved(rebound[key], of_its_kind=key == "next_id")
+    for key in ("reveal_ids", "open_ids"):
+        if isinstance(rebound.get(key), list):
+            rebound[key] = [moved(value, of_its_kind=key == "reveal_ids") for value in rebound[key]]
     if isinstance(rebound.get("fields"), list):
         rebound["fields"] = [{**field, "id": moved(field["id"])} if isinstance(field, dict) and "id" in field else field
                              for field in rebound["fields"]]
@@ -216,11 +307,14 @@ async def read_all(session, action: dict, max_pages: int = 20, limit: int = 4500
                       and not snapshot.elements[key].get("disabled")]
             if not onward:
                 break
+            item = snapshot.elements[onward[0]]
+            locator = item["frame"].locator(f'[data-rfq-observe="{onward[0]}"]')
             try:
-                await snapshot.elements[onward[0]]["frame"].locator(f'[data-rfq-observe="{onward[0]}"]').click(timeout=CLICK_LIMIT_MS)
+                await locator.click(timeout=CLICK_LIMIT_MS)
             except Exception as error:
                 pages.append(f"(stopped: the next-page control could not be used: {str(error).splitlines()[0][:120]})")
                 break
+            await wait_while_busy(item, locator)
         else:
             pages.append(f"(stopped after {max_pages} pages; narrow the result set)")
         return pages
@@ -308,24 +402,20 @@ async def act(session, action: dict) -> str | dict:
                              "do not compose addresses.")
         await page.goto(url, wait_until="domcontentloaded")
     elif kind == "click":
-        item, locator = element(session, action["id"])
+        item, locator = await unfolded(session, action["id"])
         if item.get("href"):
             href = urljoin(page.url, item["href"])
             if href.startswith(("http:", "https:")) and origin(href) not in session.allowed_origins:
                 raise ValueError("Link leaves the allowed websites")
-        await click_with_confirmation(session, locator, action.get("confirm_final"))
+        await click_with_confirmation(session, item, locator, action.get("confirm_final"))
     elif kind in ("type", "select", "check"):
-        _, locator = element(session, action["id"])
+        item, locator = await unfolded(session, action["id"])
         if kind == "type":
-            item, _ = element(session, action["id"])
             await set_value(item, locator, action.get("text", ""))
             if action.get("submit"):
                 await locator.press("Enter")
         elif kind == "select":
-            try:
-                await locator.select_option(label=str(action["option"]))
-            except Exception:
-                await locator.select_option(value=str(action["option"]))
+            await choose(item, locator, action["option"])
         else:
             await locator.set_checked(bool(action.get("checked", True)))
     elif kind == "fill":
@@ -336,11 +426,11 @@ async def act(session, action: dict) -> str | dict:
             raise ValueError("fill needs fields=[{id, text}, ...], or one observed id and text; use type for a single field")
         for value in fields:
             # An earlier field of the same form may be what enables this one.
-            item, locator = element(session, value["id"], wait_if_disabled=True)
+            item, locator = await unfolded(session, value["id"], wait_if_disabled=True)
             await set_value(item, locator, value["text"])
         if action.get("submit_id") is not None:
-            _, locator = element(session, action["submit_id"])
-            await click_with_confirmation(session, locator, action.get("confirm_final"))
+            item, locator = await unfolded(session, action["submit_id"])
+            await click_with_confirmation(session, item, locator, action.get("confirm_final"))
     elif kind == "press":
         if action.get("id") is not None:
             _, locator = element(session, action["id"])
