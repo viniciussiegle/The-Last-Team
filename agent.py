@@ -142,6 +142,12 @@ async def solve(task: dict, page) -> dict | None:
     for worker in workers.values():
         worker.spawn = spawn
     plan = await master.make_plan()
+
+    def lacking() -> list[str]:
+        draft = bid_from(board, plan, brief)
+        return [] if complete(draft) else (draft["gaps"] or ["values of some positions"])
+
+    board.lacking = lacking
     for site_id, worker in workers.items():
         worker.assign(plan["goals"].get(site_id, []) + [f"share early: {item}" for item in plan["share"].get(site_id, [])][:2])
     log(f"{llm.stamp()} [master] plan ready")
@@ -206,7 +212,12 @@ async def solve(task: dict, page) -> dict | None:
                     + "\n".join(f"- {gap}" for gap in bid["gaps"][:30]))
             for worker in workers.values():
                 worker.assign([goal])
-            await asyncio.gather(*(worker.run(until, max_steps=worker.steps + 12) for worker in workers.values()))
+            round_ = [asyncio.create_task(worker.run(until, max_steps=worker.steps + 12)) for worker in workers.values()]
+            while not all(job.done() for job in round_) and not complete(bid_from(board, plan, brief)):
+                await asyncio.wait(round_, timeout=2)
+            for job in round_:  # the gaps are closed: nobody has to finish a page that is no longer needed
+                job.cancel()
+            await asyncio.wait(round_, timeout=5)
         review = await reviewing
         board.add("master", review.get("records") or [], [])
         bid = bid_from(board, plan, brief)

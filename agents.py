@@ -153,6 +153,7 @@ class Board:
         self.accepted: list[str] = []  # one line per accepted record: for the log and for the copy check
         self.changed = asyncio.Event()
         self.headers: dict[str, list[dict]] = {}  # price-condition headers waiting for their scales
+        self.lacking = None  # set by the orchestrator: what the calculator still lacks ([] when it has everything)
 
     def add(self, site: str, records: list, notes: list, shown: str | None = None) -> list[str]:
         """Add a worker's records; returns the problems of those that were not accepted. `shown` is the squashed
@@ -434,6 +435,7 @@ class Worker:
             "" if focused else "SHARED BY OTHER WORKERS:\n" + (self.board.shared_with(self.id) or "(nothing yet)"),
             "" if focused else "RECORDED ON THIS WEBSITE:\n" + (self.board.summary(self.id, mine=True) or "(nothing yet)"),
             ("REJECTED RECORDS (fix and resend):\n" + "\n".join(self.problems[-6:])) if self.problems else "",
+            "" if focused else self.calculator_state(),
             "RECENT STEPS:\n" + "\n".join(self.history[-10:]),
             f"CURRENT SUBGOAL: {self.subgoal}",
             page, f"TASK NOW: {instruction}"] if part)
@@ -497,6 +499,19 @@ class Worker:
                 self.log(f"[{self.name}] the page: {obs.url} | {obs.text[:400]!r}")
                 return
         await self.execute(actions)
+
+    def calculator_state(self) -> str:
+        """What the bid calculation still lacks, from the calculator itself: a worker sees what is worth looking
+        for on its website and, once nothing is lacking, that it can finish."""
+        lacking = self.board.lacking() if self.board.lacking else None
+        if lacking is None:
+            return ""
+        if lacking:
+            return ("THE BID CALCULATION STILL LACKS (find what this website can hold; the other websites' workers "
+                    "look for the rest):\n" + "\n".join(f"- {gap}" for gap in lacking[:20]))
+        return ("THE BID CALCULATION HAS EVERY VALUE IT NEEDS. If a list, folder or result page of your searches is "
+                "still unread, read it now (a later entry can replace an earlier one); otherwise set done. Do not "
+                "re-read or verify what you have read.")
 
     async def wait(self, seconds: float) -> str:
         """Block until another website's worker publishes something new (at least 8 s apart), then think again."""
