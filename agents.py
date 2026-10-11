@@ -11,6 +11,7 @@ Phase 3, the master reviews the evidence and the calculator's draft and decides 
 import asyncio
 import json
 import re
+from urllib.parse import urlparse
 from collections import Counter
 
 import llm
@@ -233,6 +234,7 @@ class Worker:
         self.after_wait = False
         self.timeouts = 0
         self.read_cache: dict[str, str] = {}  # url -> text of pages read in parallel tabs
+        self.paths: dict[str, str] = {}       # address paths this website has shown -> one example of each
         self.shown = ""                       # squashed text of every page the model was shown, to check what it copies
         self.brief_text = pricing.squash(system)
         self.result: dict = {}
@@ -258,6 +260,33 @@ class Worker:
     def note(self, text: str):
         self.history.append(text[:240])
         self.log(f"[{self.name}] {text[:300]}")
+
+    def learn(self, text: str):
+        """Remember the addresses a page shows: its own, its links' targets and the addresses its forms open."""
+        targets = re.findall(r"→(/[^\s\]\)|]*)", text) + re.findall(r"opens the address (/\S*?)\)", text)
+        targets += [urlparse(url).path + ("?" + urlparse(url).query if urlparse(url).query else "")
+                    for url in re.findall(r"^URL: (\S+)", text, re.M)]
+        for target in targets:
+            path = target.split("#")[0].split("?")[0].rstrip("/") or "/"
+            if len(self.paths) < 400:
+                self.paths.setdefault(path, target[:120])
+
+    def known(self, url: str) -> bool:
+        """Whether an address is one this website has shown: the same path, or a sibling of a shown path (another
+        item under the same folder). Only the query values and the last part of such a path may be new."""
+        try:
+            path = urlparse(self.tab.resolve(url)).path.rstrip("/") or "/"
+        except ValueError:
+            return False
+        folder = path.rsplit("/", 1)[0]
+        return path in self.paths or (bool(folder) and any(seen.rsplit("/", 1)[0] == folder for seen in self.paths))
+
+    def unknown(self, urls: list[str]) -> str:
+        """The refusal for addresses the website never showed, with the address shapes it did show."""
+        shapes = " | ".join(sorted(self.paths.values(), key=len)[:30])
+        return (f"refused: {' '.join(urls)[:200]} was never shown by this website. Never guess an address: use one "
+                f"of the shapes shown so far (only query values and the last part of a path may change), or the "
+                f"page's own controls. Shown so far: {shapes[:1500]}")
 
     # ------------------------------------------------------------------ loop
     async def run(self, until: float, max_steps: int = 45):
@@ -413,6 +442,7 @@ class Worker:
         # website. Nothing a model wrote counts (subgoals, notes, rejected records), so an invented value cannot
         # come back as evidence. A turn that read a screenshot cannot be checked against text.
         self.shown += pricing.squash(page)
+        self.learn(page)
         if reply.get("tan"):
             code = str(reply["tan"]).strip()
             if images or pricing.squash(code) in self.shown:
@@ -486,12 +516,17 @@ class Worker:
                 elif op == "login":
                     result = await tab.login()
                 elif op == "goto":
-                    result = await tab.goto(action.get("url", ""))
+                    url = str(action.get("url", ""))
+                    result = await tab.goto(url) if self.known(url) else self.unknown([url])
                 elif op == "read":
                     urls = list(dict.fromkeys(str(url) for url in action.get("urls") or []))[:48]
+                    guessed = [url for url in urls if not self.known(url)]
+                    urls = [url for url in urls if url not in guessed]
                     # a focused task reads a page again to see what is new on it; otherwise a copy is as good
                     fresh = urls if self.focused else [url for url in urls if url not in self.read_cache]
-                    if not fresh:  # asked again for pages it had: it needs their text once more, so it gets it
+                    if not urls:
+                        result = self.unknown(guessed)
+                    elif not fresh:  # asked again for pages it had: it needs their text once more, so it gets it
                         self.pending += [(url, self.read_cache[url]) for url in urls]
                         result = f"given again from this run's copies: {' '.join(urls)[:200]}"
                     else:
@@ -501,7 +536,8 @@ class Worker:
                                 self.read_cache[url] = text
                         self.pending += pages
                         result = f"read {len(fresh)} pages: {' '.join(fresh)[:200]}" + (
-                            f" (skipped {len(urls) - len(fresh)} read before)" if len(fresh) < len(urls) else "")
+                            f" (skipped {len(urls) - len(fresh)} read before)" if len(fresh) < len(urls) else "") + (
+                            f"; {self.unknown(guessed)}" if guessed else "")
                 elif op == "paginate":
                     text = await tab.paginate(cid, int(action.get("max", 8)))
                     self.pending.append((f"{tab.page.url} (all pages)", text))

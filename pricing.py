@@ -10,7 +10,7 @@ reported as a gap and the affected answer fields stay blank.
 import math
 import re
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP, ROUND_FLOOR, InvalidOperation
 
 CENT = Decimal("0.01")
@@ -212,9 +212,18 @@ def when(value) -> datetime | None:
     year, month, day = int(parts[0]), int(parts[1]), int(parts[2])
     hour, minute, second = (int(part) if part else 0 for part in parts[3:6])
     try:
-        return datetime(year, month, day, hour, minute, second, tzinfo=timezone.utc)
+        moment = datetime(year, month, day, hour, minute, second, tzinfo=timezone.utc)
     except ValueError:
         return None
+    # A time written with its offset ("…T10:00:00+02:00", "10:00 UTC+2") is that much ahead of UTC.
+    rest = text[(match or german).end():]
+    offset = parts[3] and re.match(r"(?:([+-])(\d{2}):?(\d{2})\b|\s*\(?(?:UTC|GMT)\s*([+-])(\d{1,2})(?::?(\d{2}))?)", rest)
+    if offset:
+        sign, hours, minutes = (offset.group(1), offset.group(2), offset.group(3)) if offset.group(1) else (
+            offset.group(4), offset.group(5), offset.group(6))
+        shift = timedelta(hours=int(hours), minutes=int(minutes or 0))
+        moment = moment - shift if sign == "+" else moment + shift
+    return moment
 
 
 def day_end(value) -> datetime | None:
@@ -532,7 +541,7 @@ def calculate_bid(evidence: Evidence, brief_reference: str = "", brief_scenario:
         valid = []
         for row in conditions.get(norm_ref(material.get("material_number")), []):
             start, end = when(row.get("valid_from")), day_end(row.get("valid_to"))
-            if (start is None or start <= scenario) and (end is None or scenario <= end):
+            if (start is None or start.date() <= scenario.date()) and (end is None or scenario.date() <= end.date()):
                 valid.append(row)
         if not valid:
             line["gaps"].append("price condition valid on the scenario date")
@@ -578,7 +587,7 @@ def calculate_bid(evidence: Evidence, brief_reference: str = "", brief_scenario:
     for row in latest_mail("metal_index"):
         for item in items(row.get("rates")):
             start, end = when(item.get("valid_from")), day_end(item.get("valid_to"))
-            if (start is None or start <= scenario) and (end is None or scenario <= end):
+            if (start is None or start.date() <= scenario.date()) and (end is None or scenario.date() <= end.date()):
                 metal[norm_ref(item.get("key"))] = number(item.get("eur_per_kg"))
     tariffs = {}
     for row in latest_mail("packaging_tariff"):

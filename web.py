@@ -152,6 +152,20 @@ OBSERVE_JS = r"""(start) => {
     if (isRow) row++;
     if (el.shadowRoot) walk(el.shadowRoot);
     for (const child of el.childNodes) walk(child);
+    if (el.tagName === 'FORM' && (el.getAttribute('method') || 'get').toLowerCase() === 'get') {
+      // a form that submits with GET is an address: show it, so searches can be read by address
+      const parts = [];
+      for (const f of el.elements) {
+        if (!f.name || f.disabled || ['submit', 'button', 'image', 'reset', 'file', 'password'].includes(f.type)) continue;
+        if ((f.type === 'checkbox' || f.type === 'radio') && !f.checked) continue;
+        const aid = f.getAttribute('data-aid');
+        parts.push(encodeURIComponent(f.name) + '=' + (f.type === 'hidden' || !aid ? encodeURIComponent(f.value) : `<value of ${aid}>`));
+      }
+      if (parts.some(p => p.includes('<value of'))) {
+        const target = new URL(el.getAttribute('action') || '', location.href);
+        flush(); lines.push(`(this form opens the address ${target.pathname}?${parts.join('&')})`);
+      }
+    }
     if (after.trim()) cur += ' ' + after + ' ';
     if (cell) cur += ' | ';
     if (isRow) row--;
@@ -399,7 +413,7 @@ class Tab:
         return control, frame.locator(f'[data-aid="{cid}"]').first
 
     # -------------------------------------------------------------- actions
-    async def settle(self, started: int | None = None, limit: float = 30.0):
+    async def settle(self, started: int | None = None, limit: float = 20.0):
         """Wait for what the last action set off, and no longer.
 
         A navigation in flight is always waited for (a slow server included, up to `limit`): a page must never be
