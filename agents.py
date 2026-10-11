@@ -85,11 +85,15 @@ Never open, fill or save the bid submission / offer form and never request a sig
 the master submits at the end.
 Work fast, every turn costs time: as soon as you know a URL pattern (detail pages, tabs, views, result pages,
 message pages), read ALL the pages you still need for ALL candidates in one read instead of clicking page by page;
-take facts from list views when they show them; do not reread recorded pages. Keep searches narrow (exact keys,
-references, catalog groups). Once you have seen the URL of a search result page, run all further searches (other
-terms, other folders) as ONE read of result URLs with changed query values. A search usually covers only the
-current folder or list: repeat it in the other folders (e.g. an archive). When a search finds nothing, vary it (fewer words, the sender's local part, a key or
-word stem) instead of repeating it. Set done true once every goal is recorded or proven absent on this website."""
+take facts from list views when they show them; do not reread recorded pages.
+Searching: use exact keys you know for certain (the tender reference, a catalog group, a material number), one key
+per search, and never a guessed word (a topic name, a subject word, a translation): search words must all match, so
+one wrong word silently hides what exists. List first, then choose: run the key's search in every folder or list at
+once (a search covers only the current one, e.g. inbox and archive; ONE read of the result URLs with changed query
+values), read all result pages, and only then pick from the complete list what to open, reading all of those items
+in ONE read. A result count or "nothing found" on a page is the answer to that search even when part of the page
+is locked: then drop a word or change the folder; never repeat the search or unlock for it.
+Set done true once every goal is recorded or proven absent on this website."""
 
 PLAN = """
 You are the master. You have no website access; you plan the investigation. Reply with JSON:
@@ -102,8 +106,9 @@ search keys to use, which record kinds to report (positions and quantities, Q&A 
 amendments, the current specification revision and its requirements, materials with status, stock, lead times and
 complete price conditions, every mail topic the brief names, from the authorised senders, for the exact reference).
 Name cross-site dependencies (e.g. the ERP search needs the catalog groups from the specification). The mailbox
-worker also notes the bidder's own address and mail domain, and searches every folder (inbox and archive) for
-each topic, combining the exact reference with the sender's local part or a subject word. Nobody may open or fill the bid submission form now, nor request a signing TAN; the master submits at
+worker also notes the bidder's own address and mail domain; it first lists every message for the exact reference
+in every folder (inbox and archive), with the reference as the only search word and all result pages, and then
+reads the latest authorised message of each topic. Nobody may open or fill the bid submission form now, nor request a signing TAN; the master submits at
 the end. Registering participation is allowed when documents need it."""
 
 REVIEW = """
@@ -223,6 +228,7 @@ class Worker:
         self.seen = Counter()
         self.obstacles = Counter()  # obstacle pages handled, by page signature
         self.typed = Counter()  # (page, field, value) entered, against search loops
+        self.acted = Counter()  # (page signature, actions) carried out, against repeating what did not help
         self.clicked: dict[str, set] = {}
         self.screenshot = False
         self.idle = 0
@@ -254,6 +260,7 @@ class Worker:
         self.read_cache.clear()  # a new assignment may need fresh copies (a new TAN mail on the inbox page)
         self.seen.clear()
         self.obstacles.clear()
+        self.acted.clear()
         self.clicked.clear()
         self.subgoal = self.goals[0] if self.goals else self.subgoal
         self.planned.set()
@@ -319,6 +326,7 @@ class Worker:
         if obs.password:
             self.mode = "obstacle"
             self.obstacles.clear()  # a new session brings its gates back legitimately
+            self.acted.clear()
             self.note(await self.tab.login())
             return
         if self.pending:  # pages read in other tabs: the main tab staying as it is means nothing here
@@ -327,12 +335,8 @@ class Worker:
         if not self.after_wait:  # waiting for other websites' facts is not going in circles
             self.seen[obs.signature] += 1
         self.after_wait = False
-        if self.seen[obs.signature] >= 8:
-            self.note("the same page keeps returning; giving up on this website")
-            self.done = True
-            return
-        if self.goals and self.seen[obs.signature] in (4, 6):
-            await self.think(obs, "stuck")
+        if self.goals and self.seen[obs.signature] >= 4 and self.seen[obs.signature] % 2 == 0:
+            await self.think(obs, "stuck")  # a dead end costs its subgoal, never the whole website
             return
         state, target, act = await self.decide(obs)
         if state == "obstacle" and self.goals and self.obstacles[obs.signature] >= 1:
@@ -415,8 +419,10 @@ class Worker:
             "returned": "This page's lock or obstacle was already handled once and it came back (navigating relocks "
                         "it). Work with what the page already shows (result counts, texts, link URLs to read), change the search, "
                         "or move on; unlock it again only if it hides everything your goal needs.",
-            "stuck": "You are going in circles (see RECENT STEPS): the same page keeps coming back. Do something "
-                     "different now: other controls, another search, goto, read the needed URLs directly, or done.",
+            "stuck": "You are going in circles (see RECENT STEPS): the same page keeps coming back. What it shows is "
+                     "the result of what you did: a result count, 'nothing found' or a notice is an answer. Give this "
+                     "subgoal's approach up and do something different now: another exact search key, another folder "
+                     "or list, read the needed URLs directly, or the next goal; done only when nothing else is open.",
         }[mode]
         focused = self.focused
         user = "\n\n".join(part for part in [
@@ -473,7 +479,20 @@ class Worker:
         if reply.get("done") and not reply.get("actions") and not (self.problems and self.pending):
             self.done = True  # (rejected records get their fix-up turn first)
             return
-        await self.execute(reply.get("actions") or [])
+        actions = [action for action in reply.get("actions") or [] if isinstance(action, dict)]
+        # The same actions on the same page give the same page: a third identical attempt is refused, whatever
+        # the actions are. (Reading other pages, waiting and delegating do not act on this page.)
+        acting = json.dumps([a for a in actions if a.get("op") not in ("read", "wait", "screenshot", "delegate")],
+                            sort_keys=True, default=str)
+        if acting != "[]":
+            self.acted[(obs.signature, acting)] += 1
+            if self.acted[(obs.signature, acting)] > 2:
+                self.note("refused: exactly these actions were carried out twice on exactly this page and it came "
+                          "back the same, so they do not work here. What the page shows is their result (a result "
+                          "count, 'nothing found' or a notice is an answer). Do something else: another exact search "
+                          "key, another folder or list, read link targets directly, or the next goal")
+                return
+        await self.execute(actions)
 
     async def wait(self, seconds: float) -> str:
         """Block until another website's worker publishes something new (at least 8 s apart), then think again."""
