@@ -33,6 +33,7 @@ class Usage:
 
 USAGE = Usage()
 _qwen = None
+_clef = None
 _qwen_slots = asyncio.Semaphore(24)
 _clef_slots = asyncio.Semaphore(12)
 
@@ -58,13 +59,16 @@ async def qwen(system: str, user: str, max_tokens: int = 1500, images: list[str]
         {"type": "image_url", "image_url": {"url": image}} for image in images]
     messages = [{"role": "system", "content": system}, {"role": "user", "content": content}]
     error = None
+    # An answer normally takes about a second plus three per thousand output tokens. A call that hangs is asked
+    # again after a limit sized to that; the second attempt gets the full time, in case the model is merely slow.
+    first = min(timeout, 10 + max_tokens * 0.006)
     for attempt in range(attempts):
         try:
             async with _qwen_slots:
                 reply = await asyncio.wait_for(_qwen.chat.completions.create(
                     model=models.QWEN_MODEL, messages=messages, max_tokens=max_tokens, temperature=0.1,
                     response_format={"type": "json_object"},
-                    extra_body={"chat_template_kwargs": {"enable_thinking": False}}), timeout)
+                    extra_body={"chat_template_kwargs": {"enable_thinking": False}}), first if attempt == 0 else timeout)
             USAGE.qwen_calls += 1
             if reply.usage:
                 USAGE.qwen_in += reply.usage.prompt_tokens
@@ -79,7 +83,10 @@ async def qwen(system: str, user: str, max_tokens: int = 1500, images: list[str]
 
 
 async def clef(state, questions: dict, images: list[str] | None = None, timeout: float = 30) -> dict:
-    """One Clef decision; returns the answers keyed by question id."""
+    """One Clef decision; returns the answers keyed by question id. Clef answers in about a second: a call
+    without an answer after a few seconds is asked again at once, over one shared connection."""
+    global _clef
+    _clef = _clef or httpx.AsyncClient(timeout=httpx.Timeout(timeout, connect=4))
     body = {"state": state, "questions": questions}
     if images:
         body["images"] = images[:4]
@@ -89,8 +96,9 @@ async def clef(state, questions: dict, images: list[str] | None = None, timeout:
     for attempt in range(4):
         model = CLEF_MODELS[0]
         try:
-            async with _clef_slots, httpx.AsyncClient(timeout=timeout) as client:
-                response = await client.post(url, json={"model": model, **body}, headers=headers)
+            async with _clef_slots:
+                response = await asyncio.wait_for(
+                    _clef.post(url, json={"model": model, **body}, headers=headers), 6 if attempt < 2 else timeout)
             if response.status_code == 400 and "unsupported_model" in response.text and len(CLEF_MODELS) > 1:
                 if CLEF_MODELS[0] == model:  # concurrent calls may have switched already
                     CLEF_MODELS.pop(0)  # this endpoint does not serve the flash variant

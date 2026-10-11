@@ -1,12 +1,12 @@
 """The master and the website workers.
 
 Phase 1, the master (Qwen, no website access) turns the brief into goals per website.
-Phase 2, one worker per website drives its own browser. Every turn Qwen sees the worker's main page, or the pages
-it asked to read, reports typed records and chooses what to open next: many pages, searches and views at once, in
-parallel tabs. A website therefore takes a handful of turns instead of one turn per page. Records go to a shared
-board, so facts from one website (a catalog group, a key, a material number) steer the searches on another, and
-the calculator's open gaps tell every worker what the bid still lacks.
-Phase 3, the master decides the bid from the evidence and the calculator's draft (see agent.py).
+Phase 2, one worker per website drives its own browser. Each step it observes the page and asks Clef, the click
+policy, what kind of page this is (an obstacle, content worth reading, or a waypoint) and which control serves the
+current subgoal. Obstacles and waypoints are clicked through directly; Qwen is called only to read content into
+typed records, to type into forms and gates, and when the worker is stuck. Records go to a shared board, so facts
+from one website (a catalog group, a key, a material number) steer the searches on another.
+Phase 3, the master reviews the evidence and the calculator's draft and decides the bid (see agent.py).
 """
 import asyncio
 import json
@@ -21,7 +21,6 @@ TRACE = None  # set by agent.py: a JSONL file with every model turn and every re
 STEP_LIMIT = 75     # seconds one worker step may take (a model turn plus its actions); a hung page cannot stall a worker
 MAX_THINKS = 30     # Qwen turns per worker and assignment
 MAX_WAIT = 150      # seconds a worker may spend waiting for other websites' facts per assignment
-STANDING_GOAL = "find and record every fact this website holds for the bid, as the brief describes"
 
 
 def trace(event: str, **values):
@@ -45,62 +44,51 @@ identifiers, routes or numbers. Expect look-alike records, other tender referenc
 first, drafts, archived copies, decoy links (surveys, "accept and continue" links that lead away), popups, cookie
 walls, gates that ask to copy a code shown on the page, flaky error pages and expiring sessions. Numbers may carry a
 locale hint such as (de-DE) where '.' groups thousands and ',' is the decimal separator; dates may be written as
-TT/MM or MM/TT, as the page states."""
+TT/MM or MM/TT, as the page states. Locked or disabled areas often still show their text and link targets: read
+them (or open a link's URL with read) instead of unlocking them; unlock a gate only when nothing else gives access,
+and remember that navigating reloads a page and locks its gates again. Reading panes and previews usually offer
+an "open original" / full view / print link with a direct URL: read such URLs for every item you need instead of
+selecting the items one by one."""
 
 WORKER = """
-You are the worker for the website {site}; other workers cover the other websites at the same time.
-Each turn you get the current page of your main tab, or the pages you asked to read, and reply with JSON:
+You are a worker for the website {site}. The master gave you goals; other workers cover the other websites.
+Each turn you get the current page (or pages you asked to read) and reply with JSON:
 {{"records": [{{"kind": "...", "data": {{...}}}}], "notes": ["<new key fact another website's worker needs>"],
- "subgoal": "what this turn's actions are for", "actions": [...], "done": false, "tan": null}}
-
+ "subgoal": "the next thing to do on this website, in words", "actions": [...], "done": false, "tan": null}}
 records: typed evidence for the bid calculation; report only facts not yet in RECORDED ON THIS WEBSITE. Copy every
 number exactly as the page prints it, with its locale hint, e.g. "12,345 (en-US)" or "1.234,5 (de-DE)"; never
-convert, round or reformat numbers yourself. Report every candidate you read, also superseded, blocked, draft,
-other-reference or other-sender ones, with their true status, reference, sender and date, so the calculator can
-apply the rules. Record a price condition only together with its complete quantity scales. A message that carries
-none of its topic's values (a request, a review, a reminder) is not a mail record. Kinds and fields:
+convert, round or reformat numbers yourself. Report every candidate you
+read, also superseded, blocked, draft, other-reference or other-sender ones, with their true status, reference,
+sender and date, so the calculator can apply the rules. Record a price condition only together with its complete
+quantity scales (read the scale view with the header). A message that carries none of its topic's values (a
+request, a review, a reminder) is not a mail record. Kinds and fields:
 {guide}
 notes: at most three per turn, only NEW facts the other workers need for their own searches that records do not
 carry (e.g. the bidder's own address, where something is filed); never repeat a note or report status.
 "tan": only when a goal asks for a signing TAN.
 
-Every turn costs seconds and a website should take only a handful of turns: in each turn open EVERYTHING you can
-already name. These actions open pages in separate tabs, in parallel, and give you their text next turn:
- {{"op":"read","urls":["/a","/b"],"ids":[N],"follow":["link text"],"depth":1}} opens addresses of this website
-   and/or the targets of links (by id) of the current page. With "follow", every link on the opened pages whose text
-   is one of the names is opened too, down to "depth" levels: this reads all views of all chosen records at once
-   (tabs, linked views, deeper levels, a link that opens an item as its own page). The answer then ends with the
-   link names it saw but did not open: add those that can hold a fact you still need and read again.
- {{"op":"search","id":N,"queries":["a","b"]}} runs all these searches of the search field N at once and gives you
-   every result page.
- {{"op":"paginate","id":N,"max":8}} follows that next-page / load-more control of the main tab through all pages.
-   When a list shows the addresses of its pages, read them all with one read instead.
-The main tab itself is for signing in and for gates that hide everything else:
+actions run in order on the current page (a navigation ends the list):
  {{"op":"click","id":N}} | {{"op":"fill","id":N,"value":"text"}} | {{"op":"select","id":N,"option":"option text"}}
  {{"op":"check","id":N,"on":true}} | {{"op":"slide","id":N,"value":"100"}} | {{"op":"press","key":"Enter","id":N}}
- {{"op":"login"}} | {{"op":"goto","url":"/path?query"}} | {{"op":"screenshot"}} shows the page as an image
- {{"op":"wait","seconds":10}} waits until other workers publish facts you need (a key or group to search for)
-Main-tab actions run in order and end at the first navigation; put all fields of a gate and its button in one turn.
-
-How to work:
-- An area that is locked, disabled or covered but still shows its text and link targets needs no unlocking: read
-  the link targets. Clear a gate only when it hides everything, and only once: pages read in tabs never lock the
-  main tab again.
-- Lists and searches: search with the most specific key you have (the exact reference, a key, a group), all the
-  searches you need in one search action, and in every folder or list the website offers. Read all pages of a
-  result list in one read. Choose entries from their rows (exact reference, the right sender or status, the right
-  date) and then read all chosen entries at once.
-- Records with several views: learn the view names from the first read, then read all records with follow.
-- Take each fact from the view that states it finally: a total on an overview can include quantities that cannot
-  be used, and the usable figure is a level deeper; a status may be a code whose meaning the page explains
-  elsewhere; a record may have several dated entries, each with its own unit and number format.
-- A page that shows an error, a sign-in form or only a notice was not read: read it again; never conclude from it
-  that a fact is absent.
-- When a search finds nothing, vary it (fewer words, another folder, a key or word stem). Never repeat an action
-  that changed nothing.
+ {{"op":"login"}} fills this run's credentials into the visible login form
+ {{"op":"goto","url":"/path?query"}} a path already seen on this website (query values may change)
+ {{"op":"read","urls":["/a","/b"]}} opens up to 16 pages of this website in parallel; you get their text next turn
+ {{"op":"paginate","id":N,"max":8}} follows that next-page / load-more control; you get all pages next turn
+ {{"op":"delegate","goal":"..."}} starts a helper on this website (own tab, same session) for an independent part
+   of your goals, e.g. one catalog group or one group of mail topics; it records on its own. Use it early when
+   several independent lookups remain, at most 3 helpers; afterwards do not duplicate their parts.
+ {{"op":"wait","seconds":15}} waits until other workers publish facts you need
+ {{"op":"screenshot"}} shows you the page as an image next turn
+Leave actions empty when a plain click is next: the click policy then clicks toward your subgoal.
 Never open, fill or save the bid submission / offer form and never request a signing TAN unless a goal says so:
 the master submits at the end.
-Set done true, with no actions, once every goal is recorded or proven absent on this website."""
+Work fast, every turn costs time: as soon as you know a URL pattern (detail pages, tabs, views, result pages,
+message pages), read ALL the pages you still need for ALL candidates in one read instead of clicking page by page;
+take facts from list views when they show them; do not reread recorded pages. Keep searches narrow (exact keys,
+references, catalog groups). Once you have seen the URL of a search result page, run all further searches (other
+terms, other folders) as ONE read of result URLs with changed query values. A search usually covers only the
+current folder or list: repeat it in the other folders (e.g. an archive). When a search finds nothing, vary it (fewer words, the sender's local part, a key or
+word stem) instead of repeating it. Set done true once every goal is recorded or proven absent on this website."""
 
 PLAN = """
 You are the master. You have no website access; you plan the investigation. Reply with JSON:
@@ -113,9 +101,9 @@ search keys to use, which record kinds to report (positions and quantities, Q&A 
 amendments, the current specification revision and its requirements, materials with status, stock, lead times and
 complete price conditions, every mail topic the brief names, from the authorised senders, for the exact reference).
 Name cross-site dependencies (e.g. the ERP search needs the catalog groups from the specification). The mailbox
-worker also notes the bidder's own address and mail domain, and searches every folder (inbox and archive) with
-the exact reference. Nobody may open or fill the bid submission form now, nor request a signing TAN; the master
-submits at the end. Registering participation is allowed when documents need it."""
+worker also notes the bidder's own address and mail domain, and searches every folder (inbox and archive) for
+each topic, combining the exact reference with the sender's local part or a subject word. Nobody may open or fill the bid submission form now, nor request a signing TAN; the master submits at
+the end. Registering participation is allowed when documents need it."""
 
 REVIEW = """
 You are the master. The workers finished; below are their records and the calculator's draft bid, computed
@@ -124,9 +112,23 @@ exactly by the brief's formulas from those records, with the gaps it found. Deci
   bore, stroke, pressure, mounting and certification must all match an ACTIVE material exactly. Confirm or correct
   it with a material_choice record; use no_active_match only when the records prove no active match exists.
 - Fix records that were obviously mis-typed (add a corrected record of the same kind; later records win).
-Reply with JSON: {"records": [{"kind": "...", "data": {...}}],
+- List what is still missing per website as followups, only if it changes the answer.
+Reply with JSON: {"records": [{"kind": "...", "data": {...}}], "followups": {"<siteId>": "what to find"},
  "decision": "bid" or "no_bid", "bidder_email": "the bidder's own mailbox address if the notes show it, else null",
  "comment": "one sentence"}"""
+
+STATE = {
+    "obstacle": "the website is blocked right now: a login form, cookie wall, popup, survey or notice overlay, "
+                "maintenance dialog, error page asking for a retry, or an access gate that hides everything else",
+    "content": "the page shows readable information the open goals need (records, documents, messages, tables, "
+               "search results), even if some controls are locked",
+    "navigate": "a waypoint (menu, start page, empty search form, list without the needed facts): progress needs a "
+                "click or a search",
+}
+ACT = {
+    "click": "one click on the chosen control is the right next action",
+    "type": "first text must be typed, an option selected, a box ticked or a slider moved",
+}
 
 
 def brief_without_credentials(brief: str) -> str:
@@ -140,8 +142,7 @@ class Board:
     def __init__(self):
         self.evidence = pricing.Evidence()
         self.notes: list[str] = []
-        self.gaps: list[str] = []  # what the calculator still misses, kept current by the orchestrator
-        self.accepted: list[str] = []  # one line per accepted record, for the log
+        self.accepted: list[str] = []  # one line per accepted record: for the log and for the copy check
         self.changed = asyncio.Event()
         self.headers: dict[str, list[dict]] = {}  # price-condition headers waiting for their scales
 
@@ -199,35 +200,41 @@ class Board:
 
 
 class Worker:
-    """One website, one browser: Qwen reads what it opened and chooses everything to open next."""
+    """One website, one browser: switches between solving obstacles and gathering facts."""
 
     def __init__(self, site: dict, tab: Tab, board: Board, system: str, log=print, name: str | None = None):
         self.site = site
         self.id = site["siteId"]
         self.name = name or self.id
+        self.spawn = None  # set by the orchestrator: starts a helper worker on this website
         self.tab = tab
         self.board = board
         self.system = system + WORKER.format(site=self.id, guide=pricing.RECORD_GUIDE)
         self.log = log
         self.goals: list[str] = []
         self.focused = False
-        self.subgoal = "sign in and clear any start-up gate to reach the main area"
+        self.planned = asyncio.Event()
+        self.subgoal = "sign in and clear any start-up obstacles (cookie wall, notices, gates) to reach the main area"
         self.history: list[str] = []
         self.pending: list[tuple[str, str]] = []  # pages read for the next Qwen turn
         self.problems: list[str] = []
-        self.seen = Counter()       # how often the main tab showed the same page when it was the model's turn
-        self.typed = Counter()      # (page, field, value) entered, against search loops
-        self.given: set[str] = set()  # pages whose text the model has already been given
-        self.shown = ""               # squashed text of every page the model was shown, to check what it copies
-        self.brief_text = pricing.squash(system)
+        self.read_pages: set[str] = set()
+        self.seen = Counter()
+        self.obstacles = Counter()  # obstacle pages handled, by page signature
+        self.typed = Counter()  # (page, field, value) entered, against search loops
+        self.clicked: dict[str, set] = {}
         self.screenshot = False
         self.idle = 0
         self.done = False
+        self.mode = "obstacle"
         self.steps = 0
         self.thinks = 0
         self.waited = 0.0
         self.after_wait = False
         self.timeouts = 0
+        self.read_cache: dict[str, str] = {}  # url -> text of pages read in parallel tabs
+        self.shown = ""                       # squashed text of every page the model was shown, to check what it copies
+        self.brief_text = pricing.squash(system)
         self.result: dict = {}
 
     def assign(self, goals: list[str], fresh: bool = False):
@@ -237,18 +244,16 @@ class Worker:
         if fresh:  # a new, narrow task: drop the old context
             self.history.clear()
             self.pending.clear()
-            self.given.clear()  # a new task may need fresh copies (a new message on a list read before)
+            self.read_pages.clear()
         self.done = False
         self.thinks = 0
         self.waited = 0.0
+        self.read_cache.clear()  # a new assignment may need fresh copies (a new TAN mail on the inbox page)
         self.seen.clear()
-        self.subgoal = self.goals[0][:300] if self.goals else self.subgoal
-
-    def refine(self, goals: list[str]):
-        """The master's goals replace the standing goal without interrupting work in progress."""
-        goals = [str(goal) for goal in goals if str(goal).strip()]
-        if goals:
-            self.goals = goals
+        self.obstacles.clear()
+        self.clicked.clear()
+        self.subgoal = self.goals[0] if self.goals else self.subgoal
+        self.planned.set()
 
     def note(self, text: str):
         self.history.append(text[:240])
@@ -264,7 +269,7 @@ class Worker:
         while not self.done and llm.clock() < until and self.steps < max_steps:
             self.steps += 1
             try:
-                await asyncio.wait_for(self.step(), timeout=min(STEP_LIMIT, max(10.0, until - llm.clock() + 5)))
+                await asyncio.wait_for(self.step(until), timeout=min(STEP_LIMIT, max(10.0, until - llm.clock() + 5)))
                 self.timeouts = 0
             except asyncio.TimeoutError:
                 self.timeouts += 1
@@ -277,79 +282,144 @@ class Worker:
         self.log(f"[{self.name}] stopped after {self.steps} steps, {self.thinks} model turns "
                  f"({'done' if self.done else 'time or step limit'})")
 
-    async def step(self):
+    async def step(self, until: float):
         obs = await self.tab.observe()
         if obs.password:
+            self.mode = "obstacle"
+            self.obstacles.clear()  # a new session brings its gates back legitimately
             self.note(await self.tab.login())
             return
-        if self.pending:
+        if self.pending:  # pages read in other tabs: the main tab staying as it is means nothing here
             await self.think(obs, "read")
             return
         if not self.after_wait:  # waiting for other websites' facts is not going in circles
             self.seen[obs.signature] += 1
         self.after_wait = False
         if self.seen[obs.signature] >= 8:
-            self.note("the main tab keeps showing the same page and nothing was opened; giving up on this website")
+            self.note("the same page keeps returning; giving up on this website")
             self.done = True
             return
-        await self.think(obs, "stuck" if self.seen[obs.signature] in (4, 6) else "act")
+        if self.goals and self.seen[obs.signature] in (4, 6):
+            await self.think(obs, "stuck")
+            return
+        state, target, act = await self.decide(obs)
+        if state == "obstacle" and self.goals and self.obstacles[obs.signature] >= 1:
+            state, act = "content", "type"  # handled before and back again: work with what the page shows
+            self.obstacles[obs.signature] += 1
+            self.mode = "gather"
+            await self.think(obs, "returned")
+            return
+        if state == "obstacle":
+            self.mode = "obstacle"
+            self.obstacles[obs.signature] += 1
+            if act == "type":
+                await self.think(obs, "obstacle")
+            else:
+                await self.click(obs, target)
+            return
+        if not self.goals:  # warm-up done before the plan arrived: wait for it
+            self.mode = "gather"
+            try:
+                await asyncio.wait_for(self.planned.wait(), timeout=max(1.0, until - llm.clock()))
+            except asyncio.TimeoutError:
+                pass
+            return
+        self.mode = "gather"
+        if state == "content" and obs.signature not in self.read_pages:
+            await self.think(obs, "read")
+        elif act == "type" or target is None or obs.controls[target].fillable:
+            await self.think(obs, "act")
+        else:
+            await self.click(obs, target)
+
+    async def decide(self, obs: Observation) -> tuple[str, int | None, str]:
+        """Clef, the click policy: the page's state, the control to use, and whether a click suffices."""
+        tried = self.clicked.get(obs.signature, set())
+        options = {str(c.id): c.describe()[:160] for c in obs.controls.values() if c.id not in tried and not c.disabled}
+        if len(options) < 2:
+            options.update({str(c.id): c.describe()[:160] for c in list(obs.controls.values())[:2]})
+        options = dict(list(options.items())[:250])
+        if len(options) < 2:
+            return "content", None, "type"
+        state = {"website": self.id, "subgoal": self.subgoal, "open_goals": self.goals[:8] or ["sign in"],
+                 "recent_steps": self.history[-5:], "page": obs.clip(7000)}
+        answers = await llm.clef(state, {
+            "state": llm.choice("What kind of page is this? Judge the page itself, not the subgoal.", STATE),
+            "control": llm.choice("Which control should be used next to make progress toward the subgoal? Close "
+                                  "overlays with their close control; avoid decoys that lead to surveys, feedback "
+                                  "or unrelated pages, and controls already tried.", options),
+            "act": llm.choice("Is a single click on that control enough, or must something be typed or set first?", ACT),
+        })
+        target = int(answers["control"]["choice"])
+        return answers["state"]["choice"], target, answers["act"]["choice"]
+
+    async def click(self, obs: Observation, target: int | None):
+        if target is None:
+            return
+        self.clicked.setdefault(obs.signature, set()).add(target)
+        self.note(f"{self.mode}: {await self.tab.click(target)}")
 
     # ----------------------------------------------------------------- think
     async def think(self, obs: Observation, mode: str):
-        """Qwen reads the main tab (or the pages it asked for), records facts and chooses what to open next."""
+        """Qwen reads the page (or the pages it asked for), records facts and chooses the next actions."""
         if self.thinks >= MAX_THINKS:
             self.note(f"model turn budget ({MAX_THINKS}) used up; stopping")
             self.done = True
             return
         self.thinks += 1
         pages_read = []
-        if mode == "read":
+        if mode == "read" and self.pending:
             pages_read, self.pending = self.pending, []
             body = "\n\n".join(f"=== {url}\n{text}" for url, text in pages_read)
-            page = f"MAIN TAB: {obs.url}\nPAGES YOU ASKED FOR:\n{body[:160000]}"
+            page = f"CURRENT PAGE: {obs.url}\nPAGES YOU ASKED FOR:\n{body[:60000]}"
         else:
-            page = "MAIN TAB:\n" + obs.clip(30000)
+            page = "CURRENT PAGE:\n" + obs.clip(30000)
         instruction = {
-            "read": "Record the facts on these pages that serve your goals. Then open everything you still need in "
-                    "this one turn, or set done.",
-            "act": "This is your main tab. Open what your goals need (read, search); if a sign-in or a gate hides "
-                   "everything, clear it with all its fields in this one turn.",
-            "stuck": "The main tab has shown this same page several times and nothing new was opened (see RECENT "
-                     "STEPS). Do something different now: read link targets, search, another address, or done.",
+            "read": "Record the facts on these pages that serve your goals, then choose the next step.",
+            "act": "Choose the actions for the next step (typing a search, choosing a field, reading pages).",
+            "obstacle": "Something blocks this page. If what your goal needs is already readable here or reachable by "
+                        "a link URL (read), use that; if the page shows nothing to find (e.g. no results), change your "
+                        "approach; otherwise fill or set what the obstacle asks for and continue (actions).",
+            "returned": "This page's lock or obstacle was already handled once and it came back (navigating relocks "
+                        "it). Work with what the page already shows (result counts, texts, link URLs to read), change the search, "
+                        "or move on; unlock it again only if it hides everything your goal needs.",
+            "stuck": "You are going in circles (see RECENT STEPS): the same page keeps coming back. Do something "
+                     "different now: other controls, another search, goto, read the needed URLs directly, or done.",
         }[mode]
         focused = self.focused
-        gaps = [gap for gap in self.board.gaps][:16]
         user = "\n\n".join(part for part in [
             f"WEBSITE: {self.id} ({self.site['url']})",
-            "GOALS:\n" + ("\n".join(f"- {goal}" for goal in self.goals) or f"- {STANDING_GOAL}"),
+            "GOALS:\n" + ("\n".join(f"- {goal}" for goal in self.goals) or "- sign in"),
             "" if focused else "SHARED BY OTHER WORKERS:\n" + (self.board.shared_with(self.id) or "(nothing yet)"),
             "" if focused else "RECORDED ON THIS WEBSITE:\n" + (self.board.summary(self.id, mine=True) or "(nothing yet)"),
-            "" if focused or not gaps else "THE CALCULATOR STILL MISSES (some of it is other websites' work):\n"
-                                           + "\n".join(f"- {gap}" for gap in gaps),
             ("REJECTED RECORDS (fix and resend):\n" + "\n".join(self.problems[-6:])) if self.problems else "",
             "RECENT STEPS:\n" + "\n".join(self.history[-10:]),
-            f"TURN {self.thinks} ON THIS WEBSITE. LAST SUBGOAL: {self.subgoal}",
+            f"CURRENT SUBGOAL: {self.subgoal}",
             page, f"TASK NOW: {instruction}"] if part)
         images = [await self.tab.screenshot()] if self.screenshot else None
         self.screenshot = False
-        reply = await llm.qwen(self.system, user, max_tokens=3500, images=images)
+        reply = await llm.qwen(self.system, user, max_tokens=3000, images=images)
         trace("think", site=self.id, mode=mode, url=obs.url, subgoal=self.subgoal, page=page[:6000], reply=reply)
-        actions = [action for action in reply.get("actions") or [] if isinstance(action, dict)]
         if mode == "read":
+            self.read_pages.add(obs.signature)
             fresh = sum(1 for item in reply.get("records") or [] if isinstance(item, dict))
-            opens = any(action.get("op") in ("read", "search", "paginate") for action in actions)
-            self.idle = 0 if fresh or opens else self.idle + 1
-            if self.idle >= 3:
+            self.idle = 0 if fresh or reply.get("actions") and any(
+                a.get("op") in ("read", "paginate", "delegate") for a in reply["actions"] if isinstance(a, dict)) else self.idle + 1
+            if self.idle >= 4:
                 self.note("several readings brought nothing new; stopping")
                 self.done = True
                 return
-        if reply.get("tan"):
-            self.result["tan"] = str(reply["tan"]).strip()
-        records = reply.get("records") or []
         # What this worker may copy from: the pages it was shown, the brief, and records already accepted from any
         # website. Nothing a model wrote counts (subgoals, notes, rejected records), so an invented value cannot
         # come back as evidence. A turn that read a screenshot cannot be checked against text.
         self.shown += pricing.squash(page)
+        if reply.get("tan"):
+            code = str(reply["tan"]).strip()
+            if images or pricing.squash(code) in self.shown:
+                self.result["tan"] = code
+            else:
+                self.note(f"the code {code!r} stands on no page you were given; read the message itself")
+        records = reply.get("records") or []
         before = len(self.board.accepted)
         source = self.shown + self.brief_text + pricing.squash("\n".join(self.board.accepted))
         self.problems = self.board.add(self.id, records, reply.get("notes") or [], shown=None if images else source)
@@ -367,13 +437,13 @@ class Worker:
         accepted = len(records) - len(self.problems)
         self.note(f"{mode}: +{accepted} records" + (f", {len(self.problems)} rejected" if self.problems else "")
                   + f"; next: {self.subgoal}")
-        if reply.get("done") and not actions and not self.pending:  # rejected records get their fix-up turn first
-            self.done = True
+        if reply.get("done") and not reply.get("actions") and not (self.problems and self.pending):
+            self.done = True  # (rejected records get their fix-up turn first)
             return
-        await self.execute(actions)
+        await self.execute(reply.get("actions") or [])
 
     async def wait(self, seconds: float) -> str:
-        """Block until another website's worker publishes something new, then think again."""
+        """Block until another website's worker publishes something new (at least 8 s apart), then think again."""
         before = self.board.shared_with(self.id)
         start = llm.clock()
         while llm.clock() < start + seconds:
@@ -382,23 +452,15 @@ class Worker:
             except asyncio.TimeoutError:
                 break
             if self.board.shared_with(self.id) != before:
-                await asyncio.sleep(1.0)  # let a burst of facts arrive
+                await asyncio.sleep(max(0.0, start + 8 - llm.clock()))  # let a burst of facts arrive
                 return "other workers published new facts"
         return "waited; nothing new from other workers"
-
-    def take(self, pages: list[tuple[str, str]]) -> int:
-        """Queue pages for the next turn, leaving out those whose text the model was already given (a focused
-        task may read a page again: it waits for something new to appear there)."""
-        fresh = [(name, text) for name, text in pages if self.focused or name.split("  (")[0] not in self.given]
-        for name, text in fresh:
-            if not text.startswith(("[could not read", "[not read")) and not name.startswith("("):
-                self.given.add(name.split("  (")[0])
-        self.pending += fresh
-        return len(fresh)
 
     async def execute(self, actions: list):
         tab = self.tab
         for action in actions[:12]:
+            if not isinstance(action, dict):
+                continue
             op = action.get("op")
             if op == "fill" and tab.obs and action.get("id") is not None:
                 control = tab.obs.controls.get(int(action["id"]))
@@ -426,37 +488,32 @@ class Worker:
                 elif op == "goto":
                     result = await tab.goto(action.get("url", ""))
                 elif op == "read":
-                    urls = [str(url) for url in action.get("urls") or []]
-                    for link in action.get("ids") or []:
-                        control = tab.obs.controls.get(int(link)) if tab.obs else None
-                        if control and control.href:
-                            urls.append(control.href)
-                    urls = list(dict.fromkeys(urls))
-                    follow = [str(name) for name in action.get("follow") or []]
-                    if not urls:
-                        result = "read needs urls or the ids of links on the main tab"
+                    urls = list(dict.fromkeys(str(url) for url in action.get("urls") or []))[:48]
+                    # a focused task reads a page again to see what is new on it; otherwise a copy is as good
+                    fresh = urls if self.focused else [url for url in urls if url not in self.read_cache]
+                    if not fresh:  # asked again for pages it had: it needs their text once more, so it gets it
+                        self.pending += [(url, self.read_cache[url]) for url in urls]
+                        result = f"given again from this run's copies: {' '.join(urls)[:200]}"
                     else:
-                        depth = max(1, min(3, int(action.get("depth") or 1)))
-                        pages = await tab.read_pages(urls, follow, depth)
-                        taken = self.take(pages)
-                        result = (f"read {taken} pages: {' '.join(urls)[:160]}" + (f" following {follow}" if follow else "")
-                                  if taken else "not read again: you were given these pages before; their facts are "
-                                                "recorded or absent")
-                elif op == "search":
-                    queries = [str(query) for query in action.get("queries") or [] if str(query).strip()]
-                    pages = await tab.search(cid, queries)
-                    self.pending += pages
-                    result = f"searched {len(pages)} times: {' | '.join(queries)[:200]}"
+                        pages = await tab.read_pages(fresh)
+                        for url, text in pages:
+                            if not text.startswith(("[could not read", "[not read")):
+                                self.read_cache[url] = text
+                        self.pending += pages
+                        result = f"read {len(fresh)} pages: {' '.join(fresh)[:200]}" + (
+                            f" (skipped {len(urls) - len(fresh)} read before)" if len(fresh) < len(urls) else "")
                 elif op == "paginate":
                     text = await tab.paginate(cid, int(action.get("max", 8)))
                     self.pending.append((f"{tab.page.url} (all pages)", text))
                     result = "paginated"
+                elif op == "delegate":
+                    result = await self.spawn(self, str(action.get("goal", ""))) if self.spawn else "no helpers available"
                 elif op == "wait":
                     if self.waited >= MAX_WAIT:
                         result = "waited long enough: continue with what this website offers, or set done"
                     else:
                         started = llm.clock()
-                        result = await self.wait(min(30, max(3, int(action.get("seconds", 10))), MAX_WAIT - self.waited))
+                        result = await self.wait(min(30, max(5, int(action.get("seconds", 15))), MAX_WAIT - self.waited))
                         self.waited += llm.clock() - started
                         self.after_wait = True
                 elif op == "screenshot":
@@ -464,11 +521,11 @@ class Worker:
                     result = "screenshot follows"
                 else:
                     continue
-                self.note(f"{result}")
+                self.note(f"{self.mode}: {result}")
             except Exception as error:
                 self.note(f"{op} failed: {type(error).__name__}: {str(error)[:200]}")
                 break
-            if tab.page.url != before and op not in ("read", "search", "paginate", "wait"):
+            if tab.page.url != before and op not in ("read", "paginate", "wait"):
                 break
 
 
@@ -490,7 +547,7 @@ class Master:
         goals = plan.get("goals") if isinstance(plan.get("goals"), dict) else {}
         for site in self.sites:
             if not goals.get(site["siteId"]):
-                goals[site["siteId"]] = [STANDING_GOAL]
+                goals[site["siteId"]] = ["find and record every fact this website holds for the bid, as the brief describes"]
         plan["goals"] = goals
         plan["share"] = plan.get("share") if isinstance(plan.get("share"), dict) else {}
         self.plan = plan

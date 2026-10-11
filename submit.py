@@ -16,7 +16,7 @@ from decimal import Decimal
 import llm
 import pricing
 from agents import Worker
-from web import Observation, Tab, match_option, normalize
+from web import Blocked, Observation, Tab, match_option, normalize
 
 FIELDS = {
     "company": "bidder company name", "vat_id": "bidder VAT identification number (USt-IdNr.)",
@@ -89,6 +89,10 @@ class Submitter:
         self.layouts: dict[str, str] = {}        # page layout -> page kind
         self.options: dict[tuple, str] = {}      # (field, value, options) -> chosen option
         self.asked_positions: dict[tuple, str] = {}  # (layout, headings) -> the position Clef named for that page
+        self.tan_code: str | None = None     # the code read for the latest request
+        self.tan_signed: str | None = None   # the code the form was last signed with
+        self.tan_refused: set[str] = set()   # codes the form did not accept
+        self.mailbox_before: set[str] = set()  # the mailbox's links before the latest request: what is new is the code
         self.tan_requested = False
         self.tan_requests = 0
 
@@ -253,7 +257,7 @@ class Submitter:
                 continue
             if control.kind in ("checkbox", "radio", "switch"):
                 if bool(control.checked) != bool(values[field]):
-                    self.log(f"[submit] {field}: {await self.tab.check(control.id, bool(values[field]))}")
+                    self.log(f"[submit] {field}: {await self.tab.check(control.id, bool(values[field]), strict=True)}")
                     changed += 1
             elif normalize(control.value or "") != normalize(values[field]):
                 self.log(f"[submit] {field}: {await self.tab.fill(control.id, values[field])}")
@@ -314,52 +318,106 @@ class Submitter:
                 return obs.text[:600]
             repeats = repeats + 1 if obs.signature == last else 0
             last = obs.signature
-            if repeats >= 2:
-                await self.repair(obs, position)
-                continue
-            if kind in ("obstacle", "start"):
-                close = self.button(obs, "close")
-                target = close.id if close and kind == "obstacle" else await self.choose(
-                    obs, "start the offer submission for this tender (register participation first if required)"
-                    if kind == "start" else "remove the obstacle")
-                self.log(f"[submit] {kind}: {await self.tab.click(target)}")
-                continue
-            values = self.values_for(position)
-            if position and position not in self.positions and self.button(obs, "omit"):
-                self.log(f"[submit] omit {position}: {await self.tab.click(self.button(obs, 'omit').id)}")
-                continue
-            if await self.fill_selects(obs, values):
-                continue
-            await self.fill_inputs(obs, values)  # same pass: nothing reloaded, so the controls are as observed
-            if self.cascade_pending(obs, values) and self.button(obs, "apply"):
-                self.log(f"[submit] apply: {await self.tab.click(self.button(obs, 'apply').id)}")
-                continue
-            tan = self.controls_for(obs, "tan")
-            if tan and not (tan[0].value or ""):
-                if not self.tan_requested and self.button(obs, "request_tan") and self.tan_requests < 3:
-                    self.log(f"[submit] {await self.tab.click(self.button(obs, 'request_tan').id)}")
-                    self.tan_requested = True
-                    self.tan_requests += 1
-                    continue
-                code = await self.fetch_tan(obs, until)
-                if code:
-                    self.log(f"[submit] {await self.tab.fill(tan[0].id, code)}")
-                    submit = self.button(obs, "submit")
-                    if submit:  # typing changed nothing else on the page: sign in the same pass
-                        self.log(f"[submit] submit: {await self.tab.click(submit.id)}")
-                else:
-                    self.tan_requested = False  # request a fresh one
-                continue
-            control = self.button(obs, "submit") if tan else None
-            control = control or self.button(obs, "proceed")
-            if control:
-                self.log(f"[submit] {self.purposes[(control.kind, control.label)]}: {await self.tab.click(control.id)}")
-            else:
-                await self.repair(obs, position)
+            try:
+                done = await self.step(obs, kind, position, repeats, until)
+            except Blocked as blocked:  # the page is not as it was read (a dialog opened over it): read it again
+                self.log(f"[submit] {blocked}; reading the page again")
+                last, done = None, False
+            if done:
+                return None
         return None
 
-    async def choose(self, obs: Observation, goal: str) -> int:
-        options = {str(c.id): c.describe()[:160] for c in obs.controls.values() if not c.disabled}
+    def overlay(self, obs: Observation) -> list[int]:
+        """The controls of an open dialog that lies over the form (not a dialog that holds form fields itself)."""
+        found = re.search(r"\[dialog[^\]]*\](.*?)\[/dialog\]", obs.text, re.S)
+        ids = [int(number) for number in re.findall(r"\[(\d+):", found.group(1))] if found else []
+        ids = [cid for cid in ids if cid in obs.controls]
+        holds_fields = any(self.fields.get((obs.controls[cid].kind, obs.controls[cid].label), "other") != "other" for cid in ids)
+        return [] if holds_fields else ids
+
+    async def step(self, obs: Observation, kind: str, position: str | None, repeats: int, until: float) -> bool:
+        """One pass over the page as read. Form actions are strict: they refuse to act through a dialog. True ends
+        the run without a receipt."""
+        tab = self.tab
+        covering = self.overlay(obs)
+        if covering:  # a dialog over the form goes first: nothing behind it can be typed or clicked
+            close = next((cid for cid in covering
+                          if self.purposes.get((obs.controls[cid].kind, obs.controls[cid].label)) == "close"), None)
+            if close is None:
+                close = await self.choose(obs, "close the dialog that covers the form, without following its links", covering)
+            self.log(f"[submit] overlay: {await tab.click(close)}")
+            return False
+        if repeats >= 2:
+            await self.repair(obs, position)
+            return False
+        if kind in ("obstacle", "start"):
+            close = self.button(obs, "close")
+            target = close.id if close and kind == "obstacle" else await self.choose(
+                obs, "start the offer submission for this tender (register participation first if required)"
+                if kind == "start" else "remove the obstacle")
+            self.log(f"[submit] {kind}: {await tab.click(target)}")
+            return False
+        values = self.values_for(position)
+        if position and position not in self.positions and self.button(obs, "omit"):
+            self.log(f"[submit] omit {position}: {await tab.click(self.button(obs, 'omit').id, strict=True)}")
+            return False
+        if await self.fill_selects(obs, values):
+            return False
+        await self.fill_inputs(obs, values)  # same pass: nothing reloaded, so the controls are as observed
+        if self.cascade_pending(obs, values) and self.button(obs, "apply"):
+            self.log(f"[submit] apply: {await tab.click(self.button(obs, 'apply').id, strict=True)}")
+            return False
+        tan = self.controls_for(obs, "tan")
+        if tan and not (tan[0].value or ""):
+            if self.tan_signed:  # signed with this code and back at an empty field: the form refused it
+                self.log(f"[submit] the signing code {self.tan_signed} was not accepted")
+                self.tan_refused.add(self.tan_signed)
+                self.tan_signed = self.tan_code = None
+                self.tan_requested = False
+            if not self.tan_requested:
+                if self.tan_requests >= 3 or not self.button(obs, "request_tan"):
+                    self.log("[submit] no accepted signing code after three requests; giving up")
+                    return True
+                self.mailbox_before = await self.mailbox_links()
+                self.log(f"[submit] {await tab.click(self.button(obs, 'request_tan').id, strict=True)}")
+                self.tan_requested, self.tan_code = True, None
+                self.tan_requests += 1
+                return False
+            self.tan_code = self.tan_code or await self.fetch_tan(until)
+            if not self.tan_code or self.tan_code in self.tan_refused:
+                self.tan_code, self.tan_requested = None, False  # nothing usable arrived: request once more
+                return False
+            self.log(f"[submit] {await tab.fill(tan[0].id, self.tan_code)}")
+            submit = self.button(obs, "submit")
+            if submit:  # typing changed nothing else on the page: sign in the same pass
+                self.tan_signed = self.tan_code
+                self.log(f"[submit] submit: {await tab.click(submit.id, strict=True)}")
+            return False
+        control = self.button(obs, "submit") if tan else None
+        if control:
+            self.tan_signed = tan[0].value
+        control = control or self.button(obs, "proceed")
+        if control:
+            self.log(f"[submit] {self.purposes[(control.kind, control.label)]}: {await tab.click(control.id, strict=True)}")
+        else:
+            await self.repair(obs, position)
+        return False
+
+    async def mailbox_links(self) -> set[str]:
+        """The link targets on the mailbox's entry page as it is now, read in a tab of its own."""
+        if not self.mail:
+            return set()
+        try:
+            pages = await self.mail.tab.read_pages([self.mail.site["url"]])
+            return set(re.findall(r"→(\S+)", pages[0][1])) if pages else set()
+        except Exception:
+            return set()
+
+    async def choose(self, obs: Observation, goal: str, among: list[int] | None = None) -> int:
+        options = {str(c.id): c.describe()[:160] for c in obs.controls.values()
+                   if not c.disabled and (among is None or c.id in among)}
+        if len(options) == 1:
+            return int(next(iter(options)))
         answers = await llm.clef({"goal": goal, "instructions": self.brief_submission, "page": obs.clip(6000)},
                                  {"c": llm.choice(f"Which control should be clicked to {goal}? Avoid decoys.", options)})
         return int(answers["c"]["choice"])
@@ -393,24 +451,33 @@ class Submitter:
                 self.log(f"[submit] repair action failed: {error}")
                 break
 
-    async def fetch_tan(self, obs: Observation, until: float) -> str | None:
+    async def fetch_tan(self, until: float) -> str | None:
         """The mail worker reads the signing TAN that was just requested and reports the code.
 
-        It starts from a fresh copy of the mailbox's first page, read in a tab of its own: the newest message is
-        there, and nothing has to be searched or unlocked on the way."""
+        The mailbox's entry page is read in a tab of its own until it shows something it did not show before the
+        request (the new message); the model then opens that message and returns the code. Nothing has to be
+        searched or unlocked on the way, and the state of the mail worker's main tab does not matter."""
         if not self.mail:
             return None
+        pages, patience = [], llm.clock() + 8
+        while True:
+            try:
+                pages = list(await self.mail.tab.read_pages([self.mail.site["url"]]))
+            except Exception as error:
+                self.log(f"[submit] mailbox not readable: {type(error).__name__}")
+            new = set(re.findall(r"→(\S+)", pages[0][1])) - self.mailbox_before if pages else set()
+            if new or llm.clock() > patience:
+                break
+            await asyncio.sleep(0.4)
         goal = (f"A signing TAN for {self.answer['tender_reference']} was requested a moment ago (request number "
                 f"{self.tan_requests} of this run) and arrives as a new message. You are given the mailbox as it is "
-                "now: open that newest TAN message as its own page with read and return its code in the reply field "
+                "now" + (f"; these links are new since the request: {' '.join(sorted(new))[:300]}" if new else "")
+                + ". Open that newest TAN message as its own page with read and return its code in the reply field "
                 "'tan'. TAN messages of earlier requests are invalid. If the new message is not listed yet, read "
                 "the mailbox address again.")
         self.mail.result.pop("tan", None)
         self.mail.assign([goal], fresh=True)
-        try:
-            self.mail.pending = list(await self.mail.tab.read_pages([self.mail.site["url"]]))
-        except Exception as error:
-            self.log(f"[submit] mailbox not readable: {type(error).__name__}")
+        self.mail.pending = pages
         worker = asyncio.create_task(self.mail.run(min(until, llm.clock() + 60), max_steps=self.mail.steps + 10))
         try:
             while not worker.done() and not self.mail.result.get("tan"):

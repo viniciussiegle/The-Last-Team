@@ -166,7 +166,19 @@ OBSERVE_JS = r"""(start) => {
   return { text: out.join('\n'), controls, next: id, title: document.title, password, headings };
 }"""
 
+class Blocked(RuntimeError):
+    """An action did not reach its control: a dialog covers it, or the page changed since it was read."""
+
+
+# The text of the open dialog that lies over the middle of a control ('' when the control itself is on top).
+COVER_JS = """e => { const r = e.getBoundingClientRect();
+  const top = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+  if (!top || top === e || e.contains(top) || top.contains(e)) return '';
+  const modal = top.closest('dialog[open],[role=dialog],[role=alertdialog],[aria-modal=true]');
+  return modal && !modal.contains(e) ? (modal.getAttribute('aria-label') || modal.innerText || 'a dialog').trim().slice(0, 80) : ''; }"""
+
 GRACE = 0.15  # seconds an action gets to start a navigation or request before the page counts as unchanged
+BACKGROUND = 2.5  # seconds a background request started by an action is waited for (rows loading into a list)
 
 # What a browser would send for the form of a field: method, address and the successful controls with their values.
 FORM_JS = """e => { const f = e.form; if (!f) return null;
@@ -273,8 +285,8 @@ class Tab:
         self.obs: Observation | None = None
         self.events: list[str] = []  # dialogs, downloads and popups since the last observation
         self.host = urlparse(site["url"]).netloc
-        self.flight: dict = {}   # navigations and background requests in flight -> when they started
-        self.started = 0         # how many such requests this tab has started so far
+        self.flight: dict = {}   # requests in flight -> (when it started, is it a navigation, its address, its number)
+        self.started = 0         # how many navigations and background requests this tab has started so far
         self.status = 0          # HTTP status of the main document's latest navigation
         if page is not None:  # None: the tab's page is opened later with open()
             self._watch(page)
@@ -292,9 +304,10 @@ class Tab:
     def _on_request(self, request):
         """Navigations (of any frame) and background requests are what a page's next state depends on."""
         try:
-            if request.is_navigation_request() or request.resource_type in ("xhr", "fetch"):
-                self.flight[request] = time.monotonic()
+            navigation = request.is_navigation_request()
+            if navigation or request.resource_type in ("xhr", "fetch"):
                 self.started += 1
+                self.flight[request] = (time.monotonic(), navigation, request.url, self.started)
         except Exception:
             pass
 
@@ -386,22 +399,27 @@ class Tab:
         return control, frame.locator(f'[data-aid="{cid}"]').first
 
     # -------------------------------------------------------------- actions
-    async def settle(self, started: int | None = None, limit: float = 15.0):
-        """Wait for what the last action set off, and no longer: a navigation or background requests.
+    async def settle(self, started: int | None = None, limit: float = 30.0):
+        """Wait for what the last action set off, and no longer.
 
-        `started` is the request counter from before the action. When nothing starts within a short grace period
-        the action changed the page in place and there is nothing to wait for. A slow server is waited for as long
-        as its request is in flight (up to `limit`), so a page is never read in the middle of a navigation."""
-        end = time.monotonic() + limit
+        A navigation in flight is always waited for (a slow server included, up to `limit`): a page must never be
+        read while its document is being replaced. Background requests are waited for only if the action started
+        them (`started` is the request counter from before the action) and only for a short while, because a page
+        that polls its server on its own must not hold the worker. When nothing starts within a short grace
+        period the action changed the page in place and there is nothing to wait for."""
+        begun = time.monotonic()
+        end = begun + limit
         if started is not None:
-            grace = time.monotonic() + GRACE
-            while self.started == started and time.monotonic() < grace:
+            while self.started == started and time.monotonic() < begun + GRACE:
                 await asyncio.sleep(0.01)
-        seen, quiet = False, 0
+        seen, quiet, slowest = False, 0, None
         while time.monotonic() < end:
-            cutoff = time.monotonic() - 20  # a request that never ends (a stream) must not hold the page forever
-            if any(since > cutoff for since in self.flight.values()):
-                seen, quiet = True, 0
+            now = time.monotonic()
+            waiting = [(now - at, url) for at, navigation, url, number in self.flight.values()
+                       if (navigation and now - at < 45)
+                       or (not navigation and started is not None and number > started and now - at < BACKGROUND)]
+            if waiting:
+                seen, quiet, slowest = True, 0, max(waiting)
                 await asyncio.sleep(0.02)
                 continue
             quiet += 1
@@ -413,6 +431,8 @@ class Tab:
                 await frame.wait_for_load_state("domcontentloaded", timeout=max(300, (end - time.monotonic()) * 1000))
             except Exception:
                 pass
+        if slowest and time.monotonic() - begun > 3:
+            self.log(f"[{self.site['siteId']}] waited {time.monotonic() - begun:.1f}s for {urlparse(slowest[1]).path[:60]}")
         await self._retry_error_page()
 
     async def _retry_error_page(self):
@@ -429,14 +449,29 @@ class Tab:
                 return
         self.status = 0  # still failing after two reloads: show the page as it is instead of reloading for ever
 
-    async def click(self, cid: int) -> str:
+    async def _cover(self, locator) -> str:
+        """The dialog that lies over a control right now ('' when none does): an overlay may have opened after the
+        page was read, and an action behind it would wait in vain or silently do nothing."""
+        try:
+            await locator.evaluate(OPEN_DETAILS_JS, timeout=2000)
+            return await locator.evaluate(COVER_JS, timeout=2000)
+        except Exception:
+            return ""
+
+    async def click(self, cid: int, strict: bool = False) -> str:
+        """Click a control. `strict` refuses to act on a control that a dialog covers (form filling: the dialog
+        must be dealt with first); otherwise such a control is clicked directly, without waiting under the overlay."""
         control, locator = self._locate(cid)
         if control.disabled and control.href:  # a locked overlay disables the link, not its target
             await self.goto(control.href)
             return f"opened the target of {control.describe()[:120]}"
         started = self.started
+        cover = await self._cover(locator)
+        if cover and strict:
+            raise Blocked(f"'{cover}' covers {control.describe()[:80]}")
         try:
-            await locator.evaluate(OPEN_DETAILS_JS, timeout=2000)
+            if cover:
+                raise Blocked(cover)
             # no_wait_after: the click returns once it is dispatched, so a slow answer can never make it look
             # failed and be sent a second time; settle() below waits for the navigation it started
             await locator.click(timeout=1500, no_wait_after=True)
@@ -462,6 +497,10 @@ class Tab:
             return await self.select(cid, value)
         await locator.evaluate(OPEN_DETAILS_JS, timeout=3000)
         await locator.fill(value, timeout=4000)
+        # typing behind a dialog reports success and changes nothing: read the field back
+        after = await locator.evaluate("e => e.value", timeout=2000)
+        if value and after != value and after == (control.value or ""):
+            raise Blocked(f"typing into {control.label!r} had no effect: something covers it or the page changed")
         return f"filled {control.label!r} with {value!r}"
 
     async def select(self, cid: int, option: str) -> str:
@@ -472,12 +511,20 @@ class Tab:
             raise ValueError(f"no option matches {option!r}; options are {options[:40]}")
         started = self.started
         await locator.select_option(label=chosen, timeout=4000, no_wait_after=True)
+        after = await locator.evaluate("e => e.selectedIndex >= 0 ? e.options[e.selectedIndex].text : ''", timeout=2000)
+        if normalize(after) != normalize(chosen):
+            raise Blocked(f"choosing {chosen!r} in {control.label!r} had no effect: something covers it or the page changed")
         await self.settle(started)
         return f"selected {chosen!r} in {control.label!r}"
 
-    async def check(self, cid: int, on: bool = True) -> str:
+    async def check(self, cid: int, on: bool = True, strict: bool = False) -> str:
         control, locator = self._locate(cid)
+        cover = await self._cover(locator)
+        if cover and strict:
+            raise Blocked(f"'{cover}' covers {control.describe()[:80]}")
         try:
+            if cover:
+                raise Blocked(cover)
             await locator.set_checked(on, timeout=3000)
         except Exception:
             if bool(control.checked) != on:
@@ -560,30 +607,32 @@ class Tab:
             seen.add(target.split("#")[0])
             name = url + (f"  (opened by '{via}')" if via else "")
             async with semaphore:
-                page = await self.context.new_page()
-                try:
-                    for attempt in range(3):
-                        response = await page.goto(target, wait_until="domcontentloaded", timeout=15000)
+                obs = response = error = None
+                for patience in (5000, 10000, 15000):  # a request that gets no answer is asked again, in a fresh tab
+                    page = await self.context.new_page()
+                    try:
+                        response = await page.goto(target, wait_until="domcontentloaded", timeout=patience)
                         try:  # frames inside the page finish loading with its load event
                             await page.wait_for_load_state("load", timeout=4000)
                         except Exception:
                             pass
-                        if not response or response.status < 500:
-                            break
-                        await asyncio.sleep(0.3)
-                    obs = await asyncio.wait_for(self._render(page), 20)
-                except Exception as error:
-                    results.append((order, name, f"[could not read: {type(error).__name__}: {str(error)[:200]}]"))
-                    return
-                finally:
-                    await page.close()
+                        if response and response.status >= 500:
+                            await asyncio.sleep(0.3)
+                            continue
+                        obs = await asyncio.wait_for(self._render(page), 20)
+                        break
+                    except Exception as exc:
+                        error = exc
+                    finally:
+                        await page.close()
+            if obs is None:
+                why = (f"the server answered with error {response.status} three times" if response and response.status >= 500
+                       else f"{type(error).__name__}: {str(error)[:160]}")
+                results.append((order, name, f"[not read: {why}; read it again]"))
+                return
             if obs.password:
                 results.append((order, name, "[not read: this page shows a login form (the session expired); sign in "
                                              "on the main page, then read it again]"))
-                return
-            if response and response.status >= 500:
-                results.append((order, name, f"[not read: the server answered with error {response.status} three "
-                                             "times; read it again]"))
                 return
             results.append((order, name, obs.clip(limit)))
             below = []
