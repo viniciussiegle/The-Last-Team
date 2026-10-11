@@ -516,8 +516,8 @@ class Worker:
             op = action.get("op")
             if op == "fill" and tab.obs and action.get("id") is not None:
                 control = tab.obs.controls.get(int(action["id"]))
-                key = (tab.page.url.split("?")[0], control.label if control else action["id"], str(action.get("value")))
-                self.typed[key] += 1
+                key = (tab.page.url.split("#")[0], control.label if control else action["id"], str(action.get("value")))
+                self.typed[key] += 1  # per page address: the same words in another folder or list are a new search
                 if self.typed[key] > 2 and control and control.kind not in ("range", "slider"):
                     self.note(f"refused: '{action.get('value')}' was already entered into '{key[1]}' twice and the "
                               "result does not change; use other words or another approach")

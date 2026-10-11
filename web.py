@@ -193,6 +193,7 @@ COVER_JS = """e => { const r = e.getBoundingClientRect();
 
 GRACE = 0.15  # seconds an action gets to start a navigation or request before the page counts as unchanged
 BACKGROUND = 2.5  # seconds a background request started by an action is waited for (rows loading into a list)
+PATIENCE = 10.0   # seconds a page request may stay without an answer before it is sent once more
 
 # What a browser would send for the form of a field: method, address and the successful controls with their values.
 FORM_JS = """e => { const f = e.form; if (!f) return null;
@@ -302,6 +303,7 @@ class Tab:
         self.flight: dict = {}   # requests in flight -> (when it started, is it a navigation, its address, its number)
         self.started = 0         # how many navigations and background requests this tab has started so far
         self.status = 0          # HTTP status of the main document's latest navigation
+        self.asked_again: set[str] = set()  # addresses requested a second time and still unanswered
         if page is not None:  # None: the tab's page is opened later with open()
             self._watch(page)
 
@@ -328,6 +330,7 @@ class Tab:
     def _on_response(self, response):
         try:
             request = response.request
+            self.asked_again.discard(request.url)
             if request.is_navigation_request() and request.frame == self.page.main_frame:
                 self.status = response.status
         except Exception:
@@ -429,11 +432,12 @@ class Tab:
         seen, quiet, slowest = False, 0, None
         while time.monotonic() < end:
             now = time.monotonic()
-            waiting = [(now - at, url) for at, navigation, url, number in self.flight.values()
+            waiting = [(now - at, url, request) for request, (at, navigation, url, number) in list(self.flight.items())
                        if (navigation and now - at < 45)
                        or (not navigation and started is not None and number > started and now - at < BACKGROUND)]
             if waiting:
-                seen, quiet, slowest = True, 0, max(waiting)
+                seen, quiet, slowest = True, 0, max(waiting, key=lambda item: item[0])
+                await self._ask_again(waiting)
                 await asyncio.sleep(0.02)
                 continue
             quiet += 1
@@ -448,6 +452,24 @@ class Tab:
         if slowest and time.monotonic() - begun > 3:
             self.log(f"[{self.site['siteId']}] waited {time.monotonic() - begun:.1f}s for {urlparse(slowest[1]).path[:60]}")
         await self._retry_error_page()
+
+    async def _ask_again(self, waiting: list):
+        """A page request left without an answer is sent once more: a server under load can hold one request and
+        answer the next at once. Only a GET navigation is repeated (reading a page twice changes nothing), and
+        each address only once until it has answered."""
+        for age, url, request in waiting:
+            if age < PATIENCE or url in self.asked_again:
+                continue
+            try:
+                if not request.is_navigation_request() or request.method != "GET":
+                    continue
+                self.asked_again.add(url)
+                self.flight.pop(request, None)
+                self.log(f"[{self.site['siteId']}] no answer from {urlparse(url).path[:60]} for {age:.0f}s; asking again")
+                await request.frame.goto(url, wait_until="domcontentloaded", timeout=30000)
+            except Exception as error:
+                self.log(f"[{self.site['siteId']}] asking again failed: {type(error).__name__}")
+            return
 
     async def _retry_error_page(self):
         """Flaky server errors: reload a page whose main document came back with a 5xx status, at most twice."""
