@@ -1,0 +1,5 @@
+i did
+cd C:\Users\Administrator\Documents\GitHub\The-Last-Team
+git push origin claude-build
+thingz
+what next_
