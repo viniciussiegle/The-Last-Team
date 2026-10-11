@@ -34,7 +34,9 @@ ones the brief names for that topic; otherwise report it with authorized false.
   mounting, certification, catalog_group, pieces_per_set, usable_stroke (true if stroke is the usable travel
   that needs end reserves), end_reserve_key
 - material: material_number, active (true/false), catalog_group, bore, stroke, pressure, mounting, certification,
-  available_stock, stock_lead_weeks, production_lead_weeks, pieces_per_carton, surcharge_mass_g,
+  available_stock (pieces free to deliver now, from the most detailed stock view; an overall figure on an
+  overview can include blocked, reserved or inspection stock: report that one as stock_total instead),
+  stock_total, stock_lead_weeks, production_lead_weeks, pieces_per_carton, surcharge_mass_g,
   allocation_mass_g, metal_index_key
 - price_condition: material_number, valid_from, valid_to, currency, fx_key, price_unit (quantity the price refers to),
   number_format (e.g. de-DE or en-US), scales: [{min_qty, price}]
@@ -552,6 +554,9 @@ def calculate_bid(evidence: Evidence, brief_reference: str = "", brief_scenario:
             line["lead_time_weeks"] = int(number(material["stock_lead_weeks"], kind=COUNT))
         elif stock is not None and number(material.get("production_lead_weeks"), kind=COUNT) is not None:
             line["lead_time_weeks"] = int(number(material["production_lead_weeks"], kind=COUNT))
+        elif stock is None and number(material.get("stock_total"), kind=COUNT) is not None:
+            # an overall figure cannot decide between stock and production delivery
+            line["gaps"].append(f"available stock of {line['material_number']} (only an overall total is known)")
         else:
             line["gaps"].append("stock or lead times")
 

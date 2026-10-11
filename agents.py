@@ -25,7 +25,7 @@ MAX_WAIT = 150      # seconds a worker may spend waiting for other websites' fac
 
 def trace(event: str, **values):
     if TRACE:
-        with open(TRACE, "a") as out:
+        with open(TRACE, "a", encoding="utf-8") as out:
             out.write(json.dumps({"event": event, "t": round(llm.clock(), 2), **values}, ensure_ascii=False, default=str) + "\n")
 
 COMMON = """You are one agent of a team that prepares one binding tender bid from four business websites.

@@ -88,6 +88,7 @@ class Submitter:
         self.purposes: dict[tuple, str] = {}     # (kind, label) -> button purpose
         self.layouts: dict[str, str] = {}        # page layout -> page kind
         self.options: dict[tuple, str] = {}      # (field, value, options) -> chosen option
+        self.asked_positions: dict[tuple, str] = {}  # (layout, headings) -> the position Clef named for that page
         self.tan_requested = False
         self.tan_requests = 0
 
@@ -147,9 +148,20 @@ class Submitter:
         return obs.url.split("?")[0] + "|" + "|".join(sorted({f"{c.kind}:{c.label}" for c in obs.controls.values()}))
 
     async def understand(self, obs: Observation) -> tuple[str, str | None]:
-        """The page kind and its position; one Clef call per new layout maps its controls and buttons."""
-        found = [p for p in self.all_positions if re.search(rf"(?<![\d.]){re.escape(p)}(?![\d])", obs.text)]
+        """The page kind and its position; one Clef call per new layout maps its controls and buttons.
+
+        A page names the item it asks for in a heading: when exactly one position is named there, that is the
+        position, without a model call. Otherwise Clef decides, once per layout and set of headings."""
+        def named(text):
+            return [p for p in self.all_positions if re.search(rf"(?<![\d.]){re.escape(p)}(?![\d])", text)]
+        found = named(obs.text)
+        in_headings = named("\n".join(obs.headings))
         layout = self.layout(obs)
+        asked = (layout, tuple(obs.headings))
+        if len(in_headings) == 1:
+            found = in_headings
+        elif len(found) > 1 and asked in self.asked_positions:
+            found = [self.asked_positions[asked]]
         questions = {}
         if layout not in self.layouts:
             questions["page"] = llm.choice("What is this page?", PAGE)
@@ -176,6 +188,7 @@ class Submitter:
                 self.layouts[layout] = answers["page"]["choice"]
             if "position" in answers:
                 found = [answers["position"]["choice"]]
+                self.asked_positions[asked] = found[0]
         return self.layouts.get(layout, "form"), (found[0] if len(found) == 1 else None)
 
     def controls_for(self, obs: Observation, field: str) -> list:
@@ -209,14 +222,17 @@ class Submitter:
 
     # ----------------------------------------------------------------- fill
     async def fill_selects(self, obs: Observation, values: dict) -> bool:
-        """Set the first select (page order) whose value differs; True if one changed."""
+        """Set every select whose wanted option is offered now, in page order. A choice that makes the page load
+        something ends the pass, because the page must be read again: True in that case."""
         for control in sorted(obs.controls.values(), key=lambda c: c.id):
             field = self.fields.get((control.kind, control.label))
             if control.kind == "select" and field in values and not control.disabled:
                 option = await self.pick_option(control, field, values[field])
                 if option and normalize(option) != normalize(control.value or ""):
+                    before = self.tab.started
                     self.log(f"[submit] {field}: {await self.tab.select(control.id, option)}")
-                    return True
+                    if self.tab.started != before:
+                        return True
         return False
 
     async def fill_inputs(self, obs: Observation, values: dict) -> int:
@@ -305,10 +321,10 @@ class Submitter:
                 continue
             if await self.fill_selects(obs, values):
                 continue
+            await self.fill_inputs(obs, values)  # same pass: nothing reloaded, so the controls are as observed
             if self.cascade_pending(obs, values) and self.button(obs, "apply"):
                 self.log(f"[submit] apply: {await self.tab.click(self.button(obs, 'apply').id)}")
                 continue
-            await self.fill_inputs(obs, values)
             tan = self.controls_for(obs, "tan")
             if tan and not (tan[0].value or ""):
                 if not self.tan_requested and self.button(obs, "request_tan") and self.tan_requests < 3:
@@ -319,6 +335,9 @@ class Submitter:
                 code = await self.fetch_tan(obs, until)
                 if code:
                     self.log(f"[submit] {await self.tab.fill(tan[0].id, code)}")
+                    submit = self.button(obs, "submit")
+                    if submit:  # typing changed nothing else on the page: sign in the same pass
+                        self.log(f"[submit] submit: {await self.tab.click(submit.id)}")
                 else:
                     self.tan_requested = False  # request a fresh one
                 continue

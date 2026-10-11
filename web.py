@@ -23,8 +23,8 @@ OBSERVE_JS = r"""(start) => {
     'slider','spinbutton','treeitem','searchbox','menuitemcheckbox','menuitemradio']);
   const ZW = /[​-‏⁠﻿­]/g;
   let id = start, cur = '', row = 0, password = false;
-  const lines = [], controls = [];
-  const clean = (t) => (t || '').replace(ZW, '').replace(/\s+/g, ' ').trim();
+  const lines = [], controls = [], headings = [];
+  const clean =(t) => (t || '').replace(ZW, '').replace(/\s+/g, ' ').trim();
   const flush = () => { if (row) { cur += ' '; return; } const t = cur.replace(/[ \t]+/g, ' ').trim(); if (t) lines.push(t); cur = ''; };
   const visible = (el, st) => {
     if (st.display === 'none' || st.visibility === 'hidden' || st.visibility === 'collapse') return false;
@@ -118,6 +118,8 @@ OBSERVE_JS = r"""(start) => {
     if (SKIP.has(el.tagName)) return;
     const st = getComputedStyle(el);
     if (!visible(el, st)) return;
+    if (/^H[1-6]$/.test(el.tagName) || el.tagName === 'LEGEND' || el.tagName === 'CAPTION' || el.getAttribute('role') === 'heading')
+      headings.push(clean(el.innerText || el.textContent).slice(0, 200));
     if (el.tagName === 'IFRAME' || el.tagName === 'FRAME') {
       flush(); lines.push(`[frame ${clean(el.getAttribute('title') || el.getAttribute('name') || el.src).slice(0, 80)}]`); return;
     }
@@ -160,8 +162,10 @@ OBSERVE_JS = r"""(start) => {
   flush();
   const out = [];
   for (const l of lines) { const t = l.replace(/^(\s*\|\s*)+|(\s*\|\s*)+$/g, ''); if (t && out[out.length - 1] !== t) out.push(t); }
-  return { text: out.join('\n'), controls, next: id, title: document.title, password };
+  return { text: out.join('\n'), controls, next: id, title: document.title, password, headings };
 }"""
+
+GRACE = 0.15  # seconds an action gets to start a navigation or request before the page counts as unchanged
 
 OPEN_DETAILS_JS = """e => { for (let d = e.closest('details'); d; d = d.parentElement && d.parentElement.closest('details')) d.open = true;
   e.scrollIntoView({block: 'center'}); }"""
@@ -200,6 +204,7 @@ class Observation:
     text: str
     controls: dict[int, Control] = field(default_factory=dict)
     password: bool = False
+    headings: list[str] = field(default_factory=list)  # heading, legend and caption texts, in page order
 
     @property
     def signature(self) -> str:
@@ -251,6 +256,9 @@ class Tab:
         self.obs: Observation | None = None
         self.events: list[str] = []  # dialogs, downloads and popups since the last observation
         self.host = urlparse(site["url"]).netloc
+        self.flight: dict = {}   # navigations and background requests in flight -> when they started
+        self.started = 0         # how many such requests this tab has started so far
+        self.status = 0          # HTTP status of the main document's latest navigation
         if page is not None:  # None: the tab's page is opened later with open()
             self._watch(page)
 
@@ -259,6 +267,27 @@ class Tab:
         page.on("dialog", self._on_dialog)
         page.on("download", lambda download: asyncio.ensure_future(self._on_download(download)))
         page.on("popup", self._on_popup)
+        page.on("request", self._on_request)
+        page.on("requestfinished", lambda request: self.flight.pop(request, None))
+        page.on("requestfailed", lambda request: self.flight.pop(request, None))
+        page.on("response", self._on_response)
+
+    def _on_request(self, request):
+        """Navigations (of any frame) and background requests are what a page's next state depends on."""
+        try:
+            if request.is_navigation_request() or request.resource_type in ("xhr", "fetch"):
+                self.flight[request] = time.monotonic()
+                self.started += 1
+        except Exception:
+            pass
+
+    def _on_response(self, response):
+        try:
+            request = response.request
+            if request.is_navigation_request() and request.frame == self.page.main_frame:
+                self.status = response.status
+        except Exception:
+            pass
 
     async def _on_dialog(self, dialog):
         self.events.append(f"browser {dialog.type} dialog '{dialog.message[:200]}' was accepted")
@@ -292,6 +321,7 @@ class Tab:
         if self.page.is_closed():
             open_pages = [p for p in self.context.pages if not p.is_closed()]
             self.page = open_pages[-1] if open_pages else await self.context.new_page()
+        await self.settle()  # never read a page while a navigation or a background request is still in flight
         obs = await self._render(self.page)
         if self.events:
             obs.text = "\n".join(f"[event: {e[:3000]}]" for e in self.events) + "\n" + obs.text
@@ -300,7 +330,7 @@ class Tab:
         return obs
 
     async def _render(self, page) -> Observation:
-        parts, controls, password, next_id, title = [], {}, False, 1, ""
+        parts, controls, password, next_id, title, headings = [], {}, False, 1, "", []
         for index, frame in enumerate(page.frames):
             if frame.is_detached() or (index and frame.url in ("", "about:blank")):
                 continue
@@ -310,6 +340,7 @@ class Tab:
                 continue
             next_id = result["next"]
             password = password or result["password"]
+            headings += [text for text in result.get("headings", []) if text]
             if index == 0:
                 title = result["title"]
                 parts.append(result["text"])
@@ -327,7 +358,7 @@ class Tab:
             for cid in ids:
                 if cid in controls:
                     controls[cid].context = context
-        return Observation(url=page.url, title=title, text=text, controls=controls, password=password)
+        return Observation(url=page.url, title=title, text=text, controls=controls, password=password, headings=headings)
 
     def _locate(self, cid: int):
         control = self.obs.controls.get(cid) if self.obs else None
@@ -338,58 +369,69 @@ class Tab:
         return control, frame.locator(f'[data-aid="{cid}"]').first
 
     # -------------------------------------------------------------- actions
-    async def settle(self, before: str | None = None):
-        """Wait briefly for the navigation or DOM update an action started."""
-        await asyncio.sleep(0.25)
-        for _ in range(2):
+    async def settle(self, started: int | None = None, limit: float = 15.0):
+        """Wait for what the last action set off, and no longer: a navigation or background requests.
+
+        `started` is the request counter from before the action. When nothing starts within a short grace period
+        the action changed the page in place and there is nothing to wait for. A slow server is waited for as long
+        as its request is in flight (up to `limit`), so a page is never read in the middle of a navigation."""
+        end = time.monotonic() + limit
+        if started is not None:
+            grace = time.monotonic() + GRACE
+            while self.started == started and time.monotonic() < grace:
+                await asyncio.sleep(0.01)
+        seen, quiet = False, 0
+        while time.monotonic() < end:
+            cutoff = time.monotonic() - 20  # a request that never ends (a stream) must not hold the page forever
+            if any(since > cutoff for since in self.flight.values()):
+                seen, quiet = True, 0
+                await asyncio.sleep(0.02)
+                continue
+            quiet += 1
+            if not seen or quiet >= 2:  # after a navigation, a second look catches the frames it loads next
+                break
+            await asyncio.sleep(0.03)
+        for frame in self.page.frames:
             try:
-                await self.page.wait_for_load_state("domcontentloaded", timeout=6000)
+                await frame.wait_for_load_state("domcontentloaded", timeout=max(300, (end - time.monotonic()) * 1000))
             except Exception:
                 pass
-            for frame in self.page.frames[1:]:
-                try:
-                    await frame.wait_for_load_state("domcontentloaded", timeout=3000)
-                except Exception:
-                    pass
-            if before is None or self.page.url != before:
-                break
-            await asyncio.sleep(0.2)
         await self._retry_error_page()
 
     async def _retry_error_page(self):
         """Flaky server errors: reload a page whose main document came back with a 5xx status, at most twice."""
         for _ in range(2):
-            try:
-                status = await asyncio.wait_for(self.page.evaluate(
-                    "() => (performance.getEntriesByType('navigation')[0] || {}).responseStatus || 0"), 3)
-            except Exception:
+            if self.status < 500:
                 return
-            if not status or status < 500:
-                return
-            self.log(f"[{self.site['siteId']}] server error {status}; reloading")
-            await asyncio.sleep(0.4)
+            self.log(f"[{self.site['siteId']}] server error {self.status}; reloading")
+            await asyncio.sleep(0.3)
             try:
+                self.status = 0
                 await self.page.reload(wait_until="domcontentloaded", timeout=10000)
             except Exception:
                 return
+        self.status = 0  # still failing after two reloads: show the page as it is instead of reloading for ever
 
     async def click(self, cid: int) -> str:
         control, locator = self._locate(cid)
         if control.disabled and control.href:  # a locked overlay disables the link, not its target
             await self.goto(control.href)
             return f"opened the target of {control.describe()[:120]}"
-        before = self.page.url
+        started = self.started
         try:
-            await locator.evaluate(OPEN_DETAILS_JS, timeout=3000)
-            await locator.click(timeout=3000)
+            await locator.evaluate(OPEN_DETAILS_JS, timeout=2000)
+            # no_wait_after: the click returns once it is dispatched, so a slow answer can never make it look
+            # failed and be sent a second time; settle() below waits for the navigation it started
+            await locator.click(timeout=1500, no_wait_after=True)
         except Exception:
             try:
-                await locator.evaluate("e => e.click()", timeout=3000)
+                await locator.evaluate("e => e.click()", timeout=2000)
             except Exception:
                 if not control.href:
                     raise
                 await self.goto(control.href)
-        await self.settle(before)
+                return f"clicked {control.describe()[:120]}"
+        await self.settle(started)
         return f"clicked {control.describe()[:120]}"
 
     async def fill(self, cid: int, value: str) -> str:
@@ -411,9 +453,9 @@ class Tab:
         chosen = match_option(option, options)
         if chosen is None:
             raise ValueError(f"no option matches {option!r}; options are {options[:40]}")
-        before = self.page.url
-        await locator.select_option(label=chosen, timeout=4000)
-        await self.settle(before)
+        started = self.started
+        await locator.select_option(label=chosen, timeout=4000, no_wait_after=True)
+        await self.settle(started)
         return f"selected {chosen!r} in {control.label!r}"
 
     async def check(self, cid: int, on: bool = True) -> str:
@@ -426,12 +468,12 @@ class Tab:
         return f"{'checked' if on else 'unchecked'} {control.label!r}"
 
     async def press(self, key: str, cid: int | None = None) -> str:
-        before = self.page.url
+        started = self.started
         if cid is not None:
-            await self._locate(cid)[1].press(key, timeout=3000)
+            await self._locate(cid)[1].press(key, timeout=3000, no_wait_after=True)
         else:
             await asyncio.wait_for(self.page.keyboard.press(key), 5)
-        await self.settle(before)
+        await self.settle(started)
         return f"pressed {key}"
 
     def resolve(self, url: str) -> str:
@@ -469,11 +511,11 @@ class Tab:
             if not await user.count():
                 user = frame.locator("input:visible:not([type=password]):not([type=hidden]):not([type=checkbox])"
                                      ":not([readonly]):not([disabled])").first
-            before = self.page.url
+            started = self.started
             await user.fill(credentials["username"], timeout=3000)
             await password.fill(credentials["password"], timeout=3000)
-            await password.press("Enter", timeout=3000)
-            await self.settle(before)
+            await password.press("Enter", timeout=3000, no_wait_after=True)
+            await self.settle(started)
             return "signed in with the run credentials"
         raise ValueError("no login form on this page")
 
@@ -485,10 +527,13 @@ class Tab:
                 target = self.resolve(url)
                 for attempt in range(3):
                     response = await page.goto(target, wait_until="domcontentloaded", timeout=15000)
-                    await asyncio.sleep(0.35)
+                    try:  # frames inside the page finish loading with its load event
+                        await page.wait_for_load_state("load", timeout=4000)
+                    except Exception:
+                        pass
                     if not response or response.status < 500:
                         break
-                    await asyncio.sleep(0.5)
+                    await asyncio.sleep(0.3)
                 obs = await asyncio.wait_for(self._render(page), 20)
                 if obs.password:
                     return url, "[session expired: this page shows a login form; sign in on the main page, then read again]"
